@@ -1,0 +1,30 @@
+; Engine configuration file.
+; 纯代码工程:唯一场景是一个空壳 root Control(见 scenes/main.tscn),
+; 全部 UI 在 main.gd 的 _ready() 中用 Control.new() 动态构建;
+; 逻辑层(logic/*.gd)全部为 RefCounted 纯类,可在 --headless 下独立运行与测试。
+
+config_version=5
+
+[application]
+
+config/name="Saki Mahjong - Headless Logic + Dynamic UI"
+config/description="天才麻将少女式技能麻将:纯 GDScript 逻辑层(无头可跑)+ 动态构建的表现层"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.3")
+
+[debug]
+
+gdscript/warnings/integer_division=0
+gdscript/warnings/untyped_declaration=0
+gdscript/warnings/shadowed_variable=0
+gdscript/warnings/unused_parameter=0
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=800
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
