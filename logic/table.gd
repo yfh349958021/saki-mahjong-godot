@@ -444,6 +444,8 @@ func _has_ai_response() -> bool:
 
 
 func _options_for(p: MPlayer, kind: int) -> Dictionary:
+	if p.seat == last_discard.get("seat", -1):
+		return {"ron": false, "pon": false, "kan": false, "chi": []}  # 防御:碰不了自己的打牌
 	var opts := {
 		"ron": _ronnable(p, kind),
 		"pon": MAI.wants_pon(self, p, kind),

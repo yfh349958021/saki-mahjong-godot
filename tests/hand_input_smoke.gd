@@ -82,5 +82,17 @@ func _process(_d: float) -> bool:
 	main._on_hand_gui_input(tid3, 2, _mk_mouse(Vector2(100, 100), false))
 	var restored: bool = main._drag_control == null
 	print("[t5] 拖拽外松手 detached=", detached2, " 放回=", restored, " 手牌 ", size_b4, "->", table.players[0].hand.size(), " 期望不变")
+	# 回合外防御:非自家打牌阶段,座位动作被拒绝(纯逻辑断言)
+	var size_b5: int = table.players[0].hand.size()
+	table.phase = "turn_draw"
+	table.current_seat = 1
+	var tid4: int = table.players[0].hand[3]
+	var rejected: bool = not table.player_discard(0, 3)
+	var no_self_pon: bool = table._options_for(table.players[0], MTile.kind_of(table.players[0].hand[0])).pon == false
+	print("[t6] 回合外打出拒绝=", rejected, " 自碰防御=", no_self_pon, " 手牌 ", size_b5, "->", table.players[0].hand.size(), " 期望不变")
+	if rejected and size_b5 == table.players[0].hand.size():
+		print("[t6] PASS 一回合一张 + 自碰防御")
+	table.phase = "await_discard"
+	table.current_seat = 0
 	quit(0)
 	return false

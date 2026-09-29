@@ -55,6 +55,7 @@ var _selected_hand_idx := -1      # 点选浮起的手牌(实际下标)
 var _drawn_gap := false           # 本次刷新:摸牌前是否有间隔
 var _last_seen_drawn := -1        # 上次刷新时的摸牌 id(变化时清除点选)
 var _press := {}                  # 手牌按住状态 {index,pos,moved,time,detached}
+var _hand_gesture_active := false # 一次按放手势进行中(防多张连续拖出)
 var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
 var _drag_control: Control        # 拖动中的牌控件(已从手牌行摘出)
 var _drag_slot := -1              # 摘出前的显示槽位(松手还原用)
@@ -744,6 +745,9 @@ func _on_hand_gui_input(tile_id: int, real_idx: int, event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
+			if _hand_gesture_active:
+				return  # 一次手势只允许一张牌
+			_hand_gesture_active = true
 			_press = {
 				"index": real_idx, "tile_id": tile_id,
 				"pos": event.global_position, "moved": false,
@@ -765,12 +769,13 @@ func _on_hand_gui_input(tile_id: int, real_idx: int, event: InputEvent) -> void:
 func _handle_hand_release(mouse_pos: Vector2) -> void:
 	var idx: int = _press.get("index", -1)
 	var moved: bool = _press.get("moved", false)
+	_hand_gesture_active = false
 	if idx < 0:
 		return
 	if moved:
-		# 拖拽:松手位置在自家牌河范围内 = 打出(牌控件随弃);否则放回原位
+		# 拖拽:松手位置严格落在自家牌河矩形内 = 打出(牌控件随弃);否则放回原位
 		var grid: GridContainer = _river_grids[0]
-		var rect: Rect2 = grid.get_global_rect().grow(30)
+		var rect: Rect2 = grid.get_global_rect()
 		if rect.has_point(mouse_pos):
 			if _drag_control != null and is_instance_valid(_drag_control):
 				_drag_control.queue_free()
@@ -814,6 +819,8 @@ func _handle_hand_release(mouse_pos: Vector2) -> void:
 
 
 func _do_discard(real_idx: int) -> void:
+	if table == null or table.phase != "await_discard" or table.current_seat != 0:
+		return  # 不在自己打牌阶段,拒绝打出
 	_selected_hand_idx = -1
 	if _net_act("discard", {"index": real_idx}):
 		return
