@@ -61,6 +61,9 @@ var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
 var _drag_control: Control        # 拖动中的牌控件(保持在手牌容器内跟手)
 var _skill_popup: PanelContainer
 var _settings_layer: CanvasLayer
+var _analyze_panel: PanelContainer
+var _analyze_label: Label
+var _analyze_on := false
 var _settings_panel: PanelContainer
 var _table_bg: TextureRect
 var _bgm_player: AudioStreamPlayer
@@ -485,6 +488,9 @@ func _shots_step() -> void:
 		# 演示:点选浮起第一张手牌
 		if table and table.phase == "await_discard" and table.current_seat == 0:
 			_selected_hand_idx = 0
+	if _tick == 34:
+		if not _analyze_on:
+			_toggle_analyze()
 	if _tick == 70:
 		# 演示:让对家立直,验证牌河横置宣言牌与立直棒
 		var rp := table.players[2]
@@ -540,6 +546,8 @@ func _refresh() -> void:
 		_show_result()
 	if net != null and net.is_host() and net.in_game:
 		net.broadcast_snapshot_builder(table)
+	if _analyze_on:
+		_refresh_analysis()
 
 
 var _badge_refs := {}
@@ -1128,6 +1136,28 @@ func _build_settings_ui() -> void:
 	gear.pressed.connect(func(): _settings_panel.visible = not _settings_panel.visible)
 	_settings_layer.add_child(gear)
 
+	var ana := Button.new()
+	ana.text = "📊 分析"
+	ana.position = Vector2(1058, 8)
+	ana.size = Vector2(96, 30)
+	ana.pressed.connect(func(): _toggle_analyze())
+	_settings_layer.add_child(ana)
+
+	_analyze_panel = PanelContainer.new()
+	_analyze_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22e0"), 10, 10))
+	_analyze_panel.position = Vector2(60, 438)
+	_analyze_panel.custom_minimum_size = Vector2(330, 0)
+	_analyze_panel.visible = false
+	_settings_layer.add_child(_analyze_panel)
+	var abox := VBoxContainer.new()
+	abox.add_theme_constant_override("separation", 4)
+	_analyze_panel.add_child(abox)
+	var atitle := _make_label("测试·牌效分析(透视)", 14, Color("ffd166"))
+	abox.add_child(atitle)
+	_analyze_label = _make_label("", 11, Color("d8f3dc"))
+	_analyze_label.custom_minimum_size = Vector2(310, 0)
+	abox.add_child(_analyze_label)
+
 	_settings_panel = PanelContainer.new()
 	_settings_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22f2"), 12, 14))
 	_settings_panel.position = Vector2(830, 44)
@@ -1224,6 +1254,77 @@ func _on_bg_selected(path: String) -> void:
 	var path_l := _settings_panel.get_node("VBoxContainer/BgPath") as Label
 	if path_l:
 		path_l.text = path
+
+
+func _toggle_analyze() -> void:
+	_analyze_on = not _analyze_on
+	_analyze_panel.visible = _analyze_on
+	if _analyze_on:
+		_refresh_analysis()
+
+
+## 测试模式·牌效分析:下一摸宝牌/有效张概率,以及手中每张牌打出后的
+## 受入概率、放铳概率(透视各家真实听牌)、被碰概率(透视各家对子)。
+func _refresh_analysis() -> void:
+	if not _analyze_on or table == null or table.phase == "idle":
+		return
+	if net != null and net.is_online():
+		_analyze_label.text = "联机模式下不提供透视分析"
+		return
+	var me := table.players[0]
+	var melds := me.melds.size()
+	var counts := me.concealed_counts()
+	var wall_left := maxi(1, table.wall.tiles_left())
+	var dora_left := 0
+	for kind in table.wall.dora_kinds():
+		dora_left += table.wall.remaining_count(kind)
+	var base := MShanten.for_counts(counts, melds)
+	var adv := 0
+	var adv_walls := 0
+	for kind in MTile.KIND_COUNT:
+		if counts[kind] >= 4:
+			continue
+		counts[kind] += 1
+		if MShanten.for_counts(counts, melds) < base:
+			adv += 1
+			adv_walls += table.wall.remaining_count(kind)
+		counts[kind] -= 1
+	var lines: Array[String] = []
+	lines.append("下一摸:宝牌 %.1f%%  有效张 %.1f%%" % [
+		100.0 * dora_left / wall_left, 100.0 * adv_walls / wall_left])
+	var seen := {}
+	for i in me.hand.size():
+		var kind := MTile.kind_of(me.hand[i])
+		if seen.has(kind):
+			continue
+		seen[kind] = true
+		counts[kind] -= 1
+		var sh := MShanten.for_counts(counts, melds)
+		var acc_w := 0
+		for kind2 in MTile.KIND_COUNT:
+			if counts[kind2] >= 4:
+				continue
+			counts[kind2] += 1
+			if MShanten.for_counts(counts, melds) < sh:
+				acc_w += table.wall.remaining_count(kind2)
+			counts[kind2] -= 1
+		var danger := 0
+		var pon := 0
+		for p in table.players:
+			if p.seat == 0:
+				continue
+			var oc := p.concealed_counts()
+			if oc[kind] >= 2:
+				pon += 1
+			oc[kind] += 1
+			if MYaku.can_win(oc, p.melds.size()):
+				danger += 1
+			oc[kind] -= 1
+		lines.append("%s  向听%d  受入%d张 %.0f%%  铳%.0f%%  被碰%.0f%%" % [
+			MTile.label(kind), sh, acc_w, 100.0 * acc_w / wall_left,
+			100.0 * danger / 3.0, 100.0 * pon / 3.0])
+		counts[kind] += 1
+	_analyze_label.text = "\n".join(lines)
 
 
 ## 技能说明弹窗:点头像显示,再点头像或点弹窗隐藏。

@@ -191,6 +191,15 @@ func _reveal_dora() -> void:
 		ura_indicators.append(MTile.kind_of(dead_wall[idx - 1]))
 
 
+## 某种牌在牌山中剩余的实体张数(牌效分析用)。
+func remaining_count(kind: int) -> int:
+	var n := 0
+	for id in ids:
+		if MTile.kind_of(id) == kind:
+			n += 1
+	return n
+
+
 ## 宝牌实体 kind 列表(指示牌的下一张);联机副本模式下由主机快照直接下发。
 func dora_kinds() -> Array[int]:
 	if forced_dora.size() > 0:
