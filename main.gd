@@ -57,8 +57,7 @@ var _last_seen_drawn := -1        # 上次刷新时的摸牌 id(变化时清除�
 var _press := {}                  # 手牌按住状态 {index,pos,moved,time,detached}
 var _hand_gesture_active := false # 一次按放手势进行中(防多张连续拖出)
 var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
-var _drag_control: Control        # 拖动中的牌控件(已从手牌行摘出)
-var _drag_slot := -1              # 摘出前的显示槽位(松手还原用)
+var _drag_control: Control        # 拖动中的牌控件(保持在手牌容器内跟手)
 var _skill_popup: PanelContainer
 var _settings_layer: CanvasLayer
 var _settings_panel: PanelContainer
@@ -756,13 +755,13 @@ func _on_hand_gui_input(tile_id: int, real_idx: int, event: InputEvent) -> void:
 		else:
 			_handle_hand_release(event.global_position)
 	elif event is InputEventMouseMotion and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
-		if _press.get("index", -1) == real_idx \
-				and event.global_position.distance_to(_press.get("pos", event.global_position)) > 24.0:
-			_press["moved"] = true
-			if not _press.get("detached", false):
+		if _press.get("index", -1) == real_idx:
+			if not _press.get("detached", false) \
+					and event.global_position.distance_to(_press.get("pos", event.global_position)) > 24.0:
+				_press["moved"] = true
 				_press["detached"] = true
 				_detach_hand_tile(real_idx)
-			if _drag_control != null and is_instance_valid(_drag_control):
+			if _press.get("detached", false) and _drag_control != null and is_instance_valid(_drag_control):
 				_drag_control.position = event.global_position - Vector2(TILE_W / 2.0, TILE_H / 2.0)
 
 
@@ -773,19 +772,17 @@ func _handle_hand_release(mouse_pos: Vector2) -> void:
 	if idx < 0:
 		return
 	if moved:
-		# 拖拽:松手位置严格落在自家牌河矩形内 = 打出(牌控件随弃);否则放回原位
+		# 拖拽:松手位置严格落在自家牌河矩形内 = 立即打出(手牌刷新,牌出现在牌河);
+		# 否则落回原槽位
 		var grid: GridContainer = _river_grids[0]
 		var rect: Rect2 = grid.get_global_rect()
+		_drag_control = null  # 控件仍在手牌容器内,由刷新统一处理
 		if rect.has_point(mouse_pos):
-			if _drag_control != null and is_instance_valid(_drag_control):
-				_drag_control.queue_free()
-				_drag_control = null
 			_press = {}
 			_do_discard(idx)
 		else:
-			_restore_hand_tile()
 			_press = {}
-			_layout_hand_row()
+			_restore_hand_tile()
 		return
 	# 单击:模式优先(立直/咲选牌);之后按打牌方式设置
 	if _mode == "riichi":
@@ -828,27 +825,23 @@ func _do_discard(real_idx: int) -> void:
 	_refresh()
 
 
-## 拖拽开始:把牌控件从手牌行摘出(原位留空),挂到顶层跟手。
+## 拖拽开始:牌控件保持原位(保住鼠标焦点),仅抬到最上层并立即跟手。
+## —— 不能把它从容器摘出:摘出即失去鼠标焦点,后续移动/松手事件收不到。
 func _detach_hand_tile(real_idx: int) -> void:
 	for c in _hand_box.get_children():
 		if c is Control and int(c.get_meta("real_idx", -1)) == real_idx:
-			_drag_slot = c.get_index()
-			_hand_box.remove_child(c)
 			_drag_control = c
 			_drag_control.z_index = 60
 			_drag_control.position = get_global_mouse_position() - Vector2(TILE_W / 2.0, TILE_H / 2.0)
-			_game_root.add_child(_drag_control)
 			return
 
 
-## 拖拽未打出:牌控件放回手牌行原槽位。
+## 拖拽未打出:牌控件落回手牌行原槽位(位置由统一布局恢复)。
 func _restore_hand_tile() -> void:
 	if _drag_control != null and is_instance_valid(_drag_control):
 		_drag_control.z_index = 0
-		_hand_box.add_child(_drag_control)
-		_hand_box.move_child(_drag_control, clampi(_drag_slot, 0, _hand_box.get_child_count() - 1))
+	_layout_hand_row()
 	_drag_control = null
-	_drag_slot = -1
 
 
 ## 鼠标悬停手牌时,高亮自家牌河中的同种牌(振听/现物提示)。
