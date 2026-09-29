@@ -418,6 +418,7 @@ func _collect_responses() -> void:
 	_awaiting = []
 	_ron_chosen_seats = []
 	_calls = {}
+	human_options["awaiting"] = _awaiting.duplicate()
 	for other in players:
 		if other.seat == last_discard.seat:
 			continue
@@ -534,6 +535,13 @@ func human_ron() -> bool:
 	return player_ron(_human_seat)
 
 
+## 响应后处理:同步显示状态;全员(含 AI)响应完毕立即结算。
+func _after_response(seat: int) -> void:
+	human_options["awaiting"] = _awaiting.duplicate()
+	if _awaiting.is_empty() and phase == "await_response":
+		_resolve_responses()
+
+
 func player_ron(seat: int) -> bool:
 	if phase != "await_response" or seat in _ron_chosen_seats or not seat in _awaiting:
 		return false
@@ -541,6 +549,7 @@ func player_ron(seat: int) -> bool:
 		return false
 	_ron_chosen_seats.append(seat)
 	_awaiting.erase(seat)
+	_after_response(seat)
 	return true
 
 
@@ -555,6 +564,7 @@ func player_pon(seat: int) -> bool:
 		return false
 	_calls[seat] = {"action": "pon"}
 	_awaiting.erase(seat)
+	_after_response(seat)
 	return true
 
 
@@ -567,8 +577,9 @@ func player_kan(seat: int) -> bool:
 		return false
 	if not _resp.get(seat, {}).get("kan", false):
 		return false
-	_calls[seat] = {"action": "kan"}
+	_calls[seat] = {"action": "pon"}
 	_awaiting.erase(seat)
+	_after_response(seat)
 	return true
 
 
@@ -585,6 +596,7 @@ func player_chi(seat: int, combo_index: int) -> bool:
 		return false
 	_calls[seat] = {"action": "chi", "combo": combo_index}
 	_awaiting.erase(seat)
+	_after_response(seat)
 	return true
 
 
@@ -595,6 +607,7 @@ func human_decline() -> void:
 func player_decline(seat: int) -> void:
 	if phase == "await_response":
 		_awaiting.erase(seat)
+		_after_response(seat)
 
 # ———————————————————— 副露实现 ————————————————————
 
@@ -677,6 +690,7 @@ func _try_kakan(p: MPlayer, hand_index: int) -> bool:
 	_awaiting = []
 	_ron_chosen_seats = []
 	_calls = {}
+	human_options["awaiting"] = _awaiting.duplicate()
 	var any := false
 	for other in players:
 		if other.seat == p.seat:

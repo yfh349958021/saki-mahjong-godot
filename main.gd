@@ -15,6 +15,7 @@ const BACK_TOP_W := 40.0
 const BACK_TOP_H := 56.0
 const BACK_SIDE_W := 54.0
 const BACK_SIDE_H := 36.0
+const DRAWN_GAP := 20.0   # 摸牌与手牌的间隔
 
 const CHARACTER_IDS: Array[String] = [
 	"saki", "hisa", "koromo", "nodoka", "teru", "kuro", "ako", "ryuuka",
@@ -52,6 +53,7 @@ var _display_map: Array[int] = []  # 显示位置 -> 手牌实际下标
 var _hover_kind := -1
 var _selected_hand_idx := -1      # 点选浮起的手牌(实际下标)
 var _drawn_gap := false           # 本次刷新:摸牌前是否有间隔
+var _last_seen_drawn := -1        # 上次刷新时的摸牌 id(变化时清除点选)
 var _press := {}                  # 手牌按住状态 {index,pos,moved,time,detached}
 var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
 var _drag_control: Control        # 拖动中的牌控件(已从手牌行摘出)
@@ -665,14 +667,17 @@ func _refresh_hands() -> void:
 			elif table.phase == "await_response" and _human_has_options():
 				hint = "别家打牌:荣 / 碰 / 杠 / 吃?"
 	_hint_label.text = hint
-	_selected_hand_idx = -1
+	var drawn_changed: bool = table.players[0].just_drawn != _last_seen_drawn
+	_last_seen_drawn = table.players[0].just_drawn
+	if drawn_changed:
+		_selected_hand_idx = -1
 	_drawn_gap = drawn_pos >= 0
 	for pos_i in _display_map.size():
 		var real_idx: int = _display_map[pos_i]
 		if pos_i == _display_map.size() - 1 and drawn_pos >= 0:
 			var gap := ColorRect.new()
 			gap.color = Color(0, 0, 0, 0)
-			gap.size = Vector2(TILE_W, 1)
+			gap.size = Vector2(DRAWN_GAP, 1)
 			gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			_hand_box.add_child(gap)
 		var tile := _make_hand_tile(hand[real_idx], real_idx)
@@ -704,20 +709,24 @@ func _refresh_hands() -> void:
 
 func _layout_hand_row() -> void:
 	var children := _hand_box.get_children()
-	var total := children.size() * TILE_W + (TILE_W if _drawn_gap else 0.0)
-	var x := 640 - total / 2.0
+	var total := 0.0
+	var widths: Array[float] = []
+	for i in children.size():
+		var is_gap := _drawn_gap and i == children.size() - 1
+		var w := DRAWN_GAP if is_gap else TILE_W
+		widths.append(w)
+		total += w + 3
+	var x := 640 - (total - 3) / 2.0  # 末尾不留分隔
 	for i in children.size():
 		var c := children[i] as Control
 		var y := 714.0
-		# 孩子顺序即显示顺序:第 i 个孩子对应 _display_map[i](间隔空隙除外)
+		# 孩子顺序即显示顺序:第 i 个孩子对应 _display_map[i](间隔槽除外)
 		var real_idx: int = _display_map[i] if i < _display_map.size() else -1
 		if real_idx == _selected_hand_idx:
 			y -= 16  # 点选浮起
 		c.position = Vector2(x, y)
-		x += TILE_W
-		if i == children.size() - 2 and _drawn_gap:
-			x += TILE_W
-		x += 3
+		c.size = Vector2(widths[i], TILE_H)
+		x += widths[i] + 3
 
 
 ## 自家手牌牌张:点选浮起;双击打出;按住拖入牌河范围松手 = 打出。
