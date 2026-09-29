@@ -87,11 +87,10 @@ static func choose_peek(table, player, options: Array[int]) -> int:
 	return best_i
 
 
-## 是否应该宣告立直(打牌前判定;若立直则强制摸切由 Table 处理)。
+## 是否应该宣告立直:门清,且存在打出后保持听牌的打法。
 static func wants_riichi(table, player) -> bool:
-	if player.riichi or not player.is_menzen() or not player.is_tenpai():
+	if player.riichi or not player.is_menzen():
 		return false
-	# 立直后打出的那张必须仍是听牌(先试着打每张牌看是否听牌)
 	for i in player.hand.size():
 		if MShanten.for_tiles(_without(player.hand, i), player.melds.size()) == 0:
 			return true

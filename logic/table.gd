@@ -267,7 +267,8 @@ func player_riichi(seat: int, hand_index: int) -> bool:
 	if phase != "await_discard" or current_seat != seat:
 		return false
 	var p := players[seat]
-	if p.riichi or not p.is_menzen() or p.is_furiten():
+	# 振听时也允许宣告立直(标准规则:只是不能荣和,仍可自摸)
+	if p.riichi or not p.is_menzen():
 		return false
 	if hand_index < 0 or hand_index >= p.hand.size():
 		return false
@@ -1049,6 +1050,15 @@ func _find_pm_with_extra(p: MPlayer, extra_kind: int) -> Dictionary:
 
 func human_seat() -> int:
 	return _human_seat
+
+
+## 是否存在“打出后仍保持听牌”的打法(立直按钮的显示条件)。
+func has_tenpai_discard(seat: int) -> bool:
+	var p := players[seat]
+	for i in p.hand.size():
+		if MShanten.for_tiles(_hand_without(p, i), p.melds.size()) == 0:
+			return true
+	return false
 
 
 # ———————————————————— 联机快照:主机权威 → 客户端副本 ————————————————————

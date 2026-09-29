@@ -897,7 +897,7 @@ func _refresh_buttons() -> void:
 		rows.add_child(_make_action_button("龙华「雨」×%d" % me.skill.uses_left, _on_human_mulligan, Color("b5179e")))
 	if me.skill.id == "ako" and me.skill.uses_left > 0:
 		rows.add_child(_make_action_button("憧「背中」", _on_human_ako, Color("b5179e")))
-	if not me.riichi and me.is_menzen() and me.is_tenpai():
+	if not me.riichi and me.is_menzen() and table.has_tenpai_discard(0):
 		rows.add_child(_make_action_button("立直", _on_mode_riichi, Color("c1121f")))
 	if _mode == "riichi":
 		rows.add_child(_make_action_button("取消", _on_cancel_mode, Color("495057")))
