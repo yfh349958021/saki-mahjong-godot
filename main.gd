@@ -297,18 +297,8 @@ func _build_game_ui() -> void:
 
 ## 摆放某一方位的牌河/牌墙/副露/手牌。
 func _layout_seat(seat: int) -> void:
-	match SEAT_POS[seat]:
-		"bottom":
-			_river_grids[seat].position = Vector2(700, 560)
-			_meld_boxes[seat].position = Vector2(150, 716)
-		"right":
-			_river_grids[seat].position = Vector2(940, 300)
-			_meld_boxes[seat].position = Vector2(1150, 430)
-		"top":
-			_river_grids[seat].position = Vector2(560, 150)
-			_meld_boxes[seat].position = Vector2(920, 20)
-		"left":
-			_river_grids[seat].position = Vector2(190, 300)
+	# 牌河容器归零(子节点用全局坐标);鸣牌位置在 _refresh_melds 中设置
+	_river_grids[seat].position = Vector2.ZERO
 
 
 ## 座位徽章:风位 + 名字 + 分数 + 立直棒。
