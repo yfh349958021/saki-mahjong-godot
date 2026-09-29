@@ -253,7 +253,7 @@ func _build_game_ui() -> void:
 	_action_box = Control.new()
 	_action_box.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_action_box.set_offsets_preset(Control.PRESET_FULL_RECT)
-	_action_box.mouse_filter = Control.MOUSE_FILTER_PASS
+	_action_box.mouse_filter = Control.MOUSE_FILTER_IGNORE  # 全屏容器不拦截事件,内部按钮仍可点
 	_game_root.add_child(_action_box)
 
 	# 各家牌河(6 列)与牌墙/副露容器
