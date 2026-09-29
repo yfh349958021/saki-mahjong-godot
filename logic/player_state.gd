@@ -14,6 +14,7 @@ var ippatsu: bool = false            # 一发:立直后未有任何鸣牌 interv
 var rinshan_flag: bool = false       # 最近一次摸牌是否来自岭上(岭上开花判定)
 var skill: MSkill = null
 var score: int = 25000
+var ai_difficulty: int = 1          # AI 难度:0 简单 / 1 普通 / 2 困难
 var pending_peek: int = 0            # 竹井久:下一次摸牌的挑选张数
 var just_drawn: int = -1             # 最近一次摸到的实体牌 id(立直后暗杠的听牌不变判定用)
 var discards_after_riichi: int = 0   # 立直宣言后(含宣言牌)的打牌数(牌河横置牌定位用)
@@ -26,7 +27,7 @@ func setup(seat_index: int, name_: String, ai: bool, skill_id: String) -> void:
 	skill = MSkills.create(skill_id)
 
 
-func reset_for_round(dealer: bool) -> void:
+func reset_for_round(dealer: bool, start_score: int = 25000) -> void:
 	hand.clear()
 	melds.clear()
 	river.clear()
@@ -37,7 +38,7 @@ func reset_for_round(dealer: bool) -> void:
 	pending_peek = 0
 	just_drawn = -1
 	discards_after_riichi = 0
-	score = 25000 if not dealer else 25000
+	score = start_score
 	if skill:
 		skill.reset_for_round()
 

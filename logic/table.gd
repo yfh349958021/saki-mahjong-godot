@@ -33,18 +33,21 @@ var result: Dictionary = {}
 var events: Array[String] = []
 var steps_taken: int = 0
 
+var rules: Dictionary = MRules.merged()
+
 var _human_seat: int = -1
 var _resp: Dictionary = {}            # seat -> {"ron":bool,"pon":bool,"kan":bool,"chi":Array}
-var _human_responded: bool = true
-var _human_ron_chosen: bool = false
-var _human_call: Dictionary = {}      # 人类的碰/杠/吃意向 {"action":"pon"/"kan"/"chi","combo":int}
+var _awaiting: Array[int] = []        # 尚未响应的(人类)座位
+var _ron_chosen_seats: Array[int] = []# 已宣告荣和的座位
+var _calls: Dictionary = {}           # seat -> 碰/杠/吃意向 {"action":"pon"/"kan"/"chi","combo":int}
 var _pending_kakan: Dictionary = {}   # 待完成的加杠 {seat, kind, tile_id}
 
 
-func setup(skill_ids: Array, human_seat: int, seed_value: int, dealer: int = 0) -> void:
+func setup(skill_ids: Array, human_seat: int, seed_value: int, dealer: int = 0, rules_cfg: Dictionary = {}) -> void:
 	_human_seat = human_seat
 	dealer_seat = dealer
 	round_number = 1
+	rules = MRules.merged(rules_cfg)
 	players.clear()
 	for i in 4:
 		var p := MPlayer.new()
@@ -52,14 +55,14 @@ func setup(skill_ids: Array, human_seat: int, seed_value: int, dealer: int = 0) 
 		var pname: String = MSkills.create(sid).char_name if sid != "none" else "素人%d" % i
 		p.setup(i, pname, i != human_seat, sid)
 		players.append(p)
-	wall.setup(seed_value)
+	wall.setup(seed_value, rules.red_dora)
 	phase = "idle"
 
 
 func start_round(seed_value: int) -> void:
-	wall.setup(seed_value + round_number * 7919)
+	wall.setup(seed_value + round_number * 7919, rules.red_dora)
 	for p in players:
-		p.reset_for_round(p.seat == dealer_seat)
+		p.reset_for_round(p.seat == dealer_seat, rules.start_score)
 	# 配牌:每人 13 张(按座位顺序)
 	for r in 13:
 		for i in 4:
@@ -88,6 +91,8 @@ func advance_one_step() -> Dictionary:
 				return {"action": "ai_discard", "seat": p.seat}
 			return {"action": "wait_human_discard", "seat": p.seat}
 		"await_response":
+			if _awaiting.size() > 0:
+				return {"action": "wait_remote", "seat": current_seat}
 			_resolve_responses()
 			return {"action": "response", "seat": current_seat}
 		_:
@@ -146,9 +151,13 @@ func _draw_with_skills(p: MPlayer) -> int:
 
 ## 人类在 await_peek 中做出选择。
 func human_choose_peek(option_index: int) -> bool:
-	if phase != "await_peek":
+	return player_choose_peek(_human_seat, option_index)
+
+
+func player_choose_peek(seat: int, option_index: int) -> bool:
+	if phase != "await_peek" or current_seat != seat:
 		return false
-	_apply_peek(players[current_seat], clampi(option_index, 0, peek_options.size() - 1))
+	_apply_peek(players[seat], clampi(option_index, 0, peek_options.size() - 1))
 	return true
 
 
@@ -212,6 +221,7 @@ func _ai_discard_phase(p: MPlayer) -> void:
 		p.riichi = true
 		p.riichi_discarded = false
 		log_event("%s 宣告立直!" % p.display_name)
+		p.ippatsu = bool(rules.ippatsu)
 	# 6) 打牌:立直后强制摸切;立直宣言那手打出仍保持听牌的一张
 	var idx: int
 	if p.riichi and p.riichi_discarded:
@@ -228,9 +238,13 @@ func _ai_discard_phase(p: MPlayer) -> void:
 
 
 func human_discard(hand_index: int) -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_discard(_human_seat, hand_index)
+
+
+func player_discard(seat: int, hand_index: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	var p := players[_human_seat]
+	var p := players[seat]
 	var idx := hand_index
 	if p.riichi and p.riichi_discarded:
 		idx = p.hand.size() - 1  # 立直后强制摸切
@@ -246,9 +260,13 @@ func human_discard(hand_index: int) -> bool:
 
 ## 立直宣告 + 立即打出该张(人类)。
 func human_riichi(hand_index: int) -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_riichi(_human_seat, hand_index)
+
+
+func player_riichi(seat: int, hand_index: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	var p := players[_human_seat]
+	var p := players[seat]
 	if p.riichi or not p.is_menzen() or p.is_furiten():
 		return false
 	if hand_index < 0 or hand_index >= p.hand.size():
@@ -259,49 +277,69 @@ func human_riichi(hand_index: int) -> bool:
 	p.riichi_discarded = true
 	log_event("%s 宣告立直!" % p.display_name)
 	_execute_discard(p, hand_index)
-	p.ippatsu = true  # 一发机会自宣言牌打出后开始(下一次摸牌/荣和)
+	p.ippatsu = bool(rules.ippatsu)  # 一发机会自宣言牌打出后开始(规则可关)
 	return true
 
 
 func human_tsumo() -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_tsumo(_human_seat)
+
+
+func player_tsumo(seat: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	var res := _tsumo_result(players[_human_seat])
+	var res := _tsumo_result(players[seat])
 	if not res.win:
 		return false
-	_apply_win(players[_human_seat], res, true)
+	_apply_win(players[seat], res, true)
 	return true
 
 
 ## 暗杠(人类):立直时须满足“听牌不变”。
 func human_ankan(hand_index: int) -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_ankan(_human_seat, hand_index)
+
+
+func player_ankan(seat: int, hand_index: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	if not _ankan_allowed(players[_human_seat], hand_index):
+	if not _ankan_allowed(players[seat], hand_index):
 		return false
-	_do_ankan(players[_human_seat], hand_index)
+	_do_ankan(players[seat], hand_index)
 	return true
 
 
 ## 加杠(人类):把第 4 张加到已有的明碰上,他家可抢杠。
 func human_kakan(hand_index: int) -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_kakan(_human_seat, hand_index)
+
+
+func player_kakan(seat: int, hand_index: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	return _try_kakan(players[_human_seat], hand_index)
+	return _try_kakan(players[seat], hand_index)
 
 
 ## 主动技能:咲 ±1(人类)。
 func human_use_saki(hand_index: int, delta: int) -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_use_saki(_human_seat, hand_index, delta)
+
+
+func player_use_saki(seat: int, hand_index: int, delta: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	return apply_plusminus(players[_human_seat], hand_index, delta)
+	return apply_plusminus(players[seat], hand_index, delta)
 
 
 ## 主动技能:久 预约挑选(人类;下一次摸牌生效)。
 func human_use_hisa() -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_use_hisa(_human_seat)
+
+
+func player_use_hisa(seat: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	var p := players[_human_seat]
+	var p := players[seat]
 	if p.skill == null or p.skill.id != "hisa" or p.skill.uses_left <= 0 or p.riichi:
 		return false
 	if p.pending_peek > 0:
@@ -314,16 +352,24 @@ func human_use_hisa() -> bool:
 
 ## 主动技能:龙华 换牌(人类;刚摸的牌放回重摸)。
 func human_use_mulligan() -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_use_mulligan(_human_seat)
+
+
+func player_use_mulligan(seat: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	return _do_mulligan(players[_human_seat])
+	return _do_mulligan(players[seat])
 
 
 ## 主动技能:憧 呼唤宝牌(人类)。
 func human_use_ako() -> bool:
-	if phase != "await_discard" or current_seat != _human_seat:
+	return player_use_ako(_human_seat)
+
+
+func player_use_ako(seat: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
 		return false
-	return _do_ako(players[_human_seat])
+	return _do_ako(players[seat])
 
 
 ## 咲的核心实现:把手牌数组中的一张实体牌改写为同花色 ±1 的 kind。
@@ -368,10 +414,9 @@ func _execute_discard(p: MPlayer, idx: int) -> void:
 func _collect_responses() -> void:
 	_resp = {}
 	human_options = {}
-	_human_responded = true
-	_human_ron_chosen = false
-	_human_call = {}
-	var any := false
+	_awaiting = []
+	_ron_chosen_seats = []
+	_calls = {}
 	for other in players:
 		if other.seat == last_discard.seat:
 			continue
@@ -379,12 +424,21 @@ func _collect_responses() -> void:
 		_resp[other.seat] = opts
 		if other.seat == _human_seat:
 			human_options = opts
+		if not other.is_ai and (opts.ron or opts.pon or opts.kan or (opts.chi as Array).size() > 0):
+			_awaiting.append(other.seat)
+	if _awaiting.size() > 0 or _has_ai_response():
+		phase = "await_response"
+	else:
+		phase = "between"
+
+
+func _has_ai_response() -> bool:
+	for seat in _resp:
+		if players[seat].is_ai:
+			var opts: Dictionary = _resp[seat]
 			if opts.ron or opts.pon or opts.kan or (opts.chi as Array).size() > 0:
-				any = true
-				_human_responded = false
-		elif opts.ron or opts.pon or opts.kan or (opts.chi as Array).size() > 0:
-			any = true
-	phase = "await_response" if any else "between"
+				return true
+	return false
 
 
 func _options_for(p: MPlayer, kind: int) -> Dictionary:
@@ -421,16 +475,12 @@ func _ronnable(p: MPlayer, kind: int) -> bool:
 
 
 func _resolve_responses() -> void:
-	if not _human_responded:
-		return  # 人类尚未决定
 	# 1) 荣和(含多响):AI 荣 + 人类已宣告荣,各自满额由放铳/加杠者支付
 	var ron_seats: Array[int] = []
 	for seat in _resp:
 		var opts: Dictionary = _resp[seat]
-		if opts.get("ron", false) and players[seat].is_ai:
+		if opts.get("ron", false) and (players[seat].is_ai or seat in _ron_chosen_seats):
 			ron_seats.append(seat)
-	if _human_ron_chosen and _resp.get(_human_seat, {}).get("ron", false):
-		ron_seats.append(_human_seat)
 	if ron_seats.size() > 0:
 		_apply_multi_ron(ron_seats)
 		return
@@ -439,19 +489,23 @@ func _resolve_responses() -> void:
 		_complete_kakan()
 		return
 	# 2) 人类的碰/杠/吃意向
-	if not _human_call.is_empty():
-		var me := players[_human_seat]
-		match _human_call.get("action", ""):
-			"pon":
-				_do_pon(me)
-			"kan":
-				_do_daiminkan(me)
-			"chi":
-				var combos: Array = _resp.get(_human_seat, {}).get("chi", [])
-				if _human_call.combo < combos.size():
-					_do_chi(me, combos[_human_call.combo])
-		_human_call = {}
-		return
+	if _calls.size() > 0:
+		var discarder0: int = last_discard.get("seat", 0)
+		for k in 3:
+			var seat := (discarder0 + 1 + k) % 4
+			if _calls.has(seat):
+				var me := players[seat]
+				match _calls[seat].get("action", ""):
+					"pon":
+						_do_pon(me)
+					"kan":
+						_do_daiminkan(me)
+					"chi":
+						var combos: Array = _resp.get(seat, {}).get("chi", [])
+						if _calls[seat].combo < combos.size():
+							_do_chi(me, combos[_calls[seat].combo])
+				_calls.erase(seat)
+				return
 	# 3) AI 响应:按离放铳者距离 杠 > 碰 > 吃(仅下家)
 	var discarder: int = last_discard.get("seat", 0)
 	for k in 3:
@@ -476,50 +530,70 @@ func _resolve_responses() -> void:
 
 
 func human_ron() -> bool:
-	if phase != "await_response" or _human_responded:
+	return player_ron(_human_seat)
+
+
+func player_ron(seat: int) -> bool:
+	if phase != "await_response" or seat in _ron_chosen_seats or not seat in _awaiting:
 		return false
-	if not _resp.get(_human_seat, {}).get("ron", false):
+	if not _resp.get(seat, {}).get("ron", false):
 		return false
-	_human_ron_chosen = true
-	_human_responded = true
+	_ron_chosen_seats.append(seat)
+	_awaiting.erase(seat)
 	return true
 
 
 func human_pon() -> bool:
-	if phase != "await_response" or _human_responded:
+	return player_pon(_human_seat)
+
+
+func player_pon(seat: int) -> bool:
+	if phase != "await_response" or seat in _ron_chosen_seats or not seat in _awaiting:
 		return false
-	if not _resp.get(_human_seat, {}).get("pon", false):
+	if not _resp.get(seat, {}).get("pon", false):
 		return false
-	_human_call = {"action": "pon"}
-	_human_responded = true
+	_calls[seat] = {"action": "pon"}
+	_awaiting.erase(seat)
 	return true
 
 
 func human_kan() -> bool:
-	if phase != "await_response" or _human_responded:
+	return player_kan(_human_seat)
+
+
+func player_kan(seat: int) -> bool:
+	if phase != "await_response" or seat in _ron_chosen_seats or not seat in _awaiting:
 		return false
-	if not _resp.get(_human_seat, {}).get("kan", false):
+	if not _resp.get(seat, {}).get("kan", false):
 		return false
-	_human_call = {"action": "kan"}
-	_human_responded = true
+	_calls[seat] = {"action": "kan"}
+	_awaiting.erase(seat)
 	return true
 
 
 ## 人类吃:combo_index 为 human_options.chi 中的下标。
 func human_chi(combo_index: int) -> bool:
-	if phase != "await_response" or _human_responded:
+	return player_chi(_human_seat, combo_index)
+
+
+func player_chi(seat: int, combo_index: int) -> bool:
+	if phase != "await_response" or seat in _ron_chosen_seats or not seat in _awaiting:
 		return false
-	var combos: Array = _resp.get(_human_seat, {}).get("chi", [])
+	var combos: Array = _resp.get(seat, {}).get("chi", [])
 	if combo_index < 0 or combo_index >= combos.size():
 		return false
-	_human_call = {"action": "chi", "combo": combo_index}
-	_human_responded = true
+	_calls[seat] = {"action": "chi", "combo": combo_index}
+	_awaiting.erase(seat)
 	return true
 
 
 func human_decline() -> void:
+	player_decline(_human_seat)
+
+
+func player_decline(seat: int) -> void:
 	if phase == "await_response":
-		_human_responded = true
+		_awaiting.erase(seat)
 
 # ———————————————————— 副露实现 ————————————————————
 
@@ -599,9 +673,9 @@ func _try_kakan(p: MPlayer, hand_index: int) -> bool:
 	# 抢杠响应:仅荣和
 	_resp = {}
 	human_options = {}
-	_human_responded = true
-	_human_ron_chosen = false
-	_human_call = {}
+	_awaiting = []
+	_ron_chosen_seats = []
+	_calls = {}
 	var any := false
 	for other in players:
 		if other.seat == p.seat:
@@ -610,11 +684,10 @@ func _try_kakan(p: MPlayer, hand_index: int) -> bool:
 		_resp[other.seat] = opts
 		if other.seat == _human_seat:
 			human_options = opts
-			if opts.ron:
-				any = true
-				_human_responded = false
-		elif opts.ron:
+		if opts.ron:
 			any = true
+			if not other.is_ai:
+				_awaiting.append(other.seat)
 	log_event("%s 宣告加杠 %s" % [p.display_name, MTile.label(kind)])
 	if any:
 		phase = "await_response"
@@ -849,6 +922,7 @@ func _apply_multi_ron(win_seats: Array[int]) -> void:
 func _tsumo_result(p: MPlayer) -> Dictionary:
 	var ctx := {
 		"tsumo": true,
+		"kuitan": bool(rules.kuitan),
 		"riichi": p.riichi,
 		"ippatsu": p.ippatsu,
 		"rinshan": p.rinshan_flag,
@@ -856,7 +930,7 @@ func _tsumo_result(p: MPlayer) -> Dictionary:
 		"round_wind": MTile.EAST,
 		"win_tile_kind": MTile.kind_of(p.just_drawn) if p.just_drawn >= 0 else -1,
 		"dora_kinds": wall.dora_kinds(),
-		"ura_dora_kinds": wall.ura_kinds() if p.riichi else [],
+		"ura_dora_kinds": wall.ura_kinds() if (p.riichi and bool(rules.ura)) else [],
 		"dealer_seat": dealer_seat,
 		"win_seat": p.seat,
 	}
@@ -866,6 +940,7 @@ func _tsumo_result(p: MPlayer) -> Dictionary:
 func _ron_ctx(p: MPlayer, kind: int) -> Dictionary:
 	return {
 		"tsumo": false,
+		"kuitan": bool(rules.kuitan),
 		"riichi": p.riichi,
 		"ippatsu": p.ippatsu,
 		"rinshan": false,
@@ -873,7 +948,7 @@ func _ron_ctx(p: MPlayer, kind: int) -> Dictionary:
 		"round_wind": MTile.EAST,
 		"win_tile_kind": kind,
 		"dora_kinds": wall.dora_kinds(),
-		"ura_dora_kinds": wall.ura_kinds() if p.riichi else [],
+		"ura_dora_kinds": wall.ura_kinds() if (p.riichi and bool(rules.ura)) else [],
 		"dealer_seat": dealer_seat,
 		"win_seat": p.seat,
 		"loser_seat": last_discard.get("seat", (p.seat + 1) % 4),
@@ -974,6 +1049,78 @@ func _find_pm_with_extra(p: MPlayer, extra_kind: int) -> Dictionary:
 
 func human_seat() -> int:
 	return _human_seat
+
+
+# ———————————————————— 联机快照:主机权威 → 客户端副本 ————————————————————
+
+## 为指定座位构建“视角快照”:自家手牌为真实 id,其余座位只有牌数。
+func snapshot_for(seat: int) -> Dictionary:
+	var snap := {
+		"phase": phase, "current_seat": current_seat, "turn_count": turn_count,
+		"dealer_seat": dealer_seat,
+		"scores": {}, "riichi": {}, "disc_riichi": {}, "rivers": {}, "melds": {}, "hand_sizes": {},
+		"dora": wall.dora_kinds(), "ura": wall.ura_kinds(),
+		"wall_left": wall.tiles_left(),
+		"last_discard": last_discard, "peek_options": peek_options.duplicate(),
+		"options": (_resp.get(seat, {}) if players[seat].is_ai == false else {}),
+		"awaiting": _awaiting.duplicate(),
+		"just_drawn": players[seat].just_drawn,
+		"hand": players[seat].hand.duplicate(),
+		"result": (result.duplicate(true) if phase == "round_end" else {}),
+		"pending_peek": players[seat].pending_peek,
+		"human_seat": seat,
+	}
+	for p in players:
+		snap.scores[p.seat] = p.score
+		snap.riichi[p.seat] = p.riichi
+		snap.disc_riichi[p.seat] = p.discards_after_riichi
+		snap.rivers[p.seat] = p.river.duplicate()
+		snap.melds[p.seat] = p.melds.duplicate(true)
+		snap.hand_sizes[p.seat] = p.hand.size()
+	return snap
+
+
+## 客户端:把快照应用到本地副本(用于纯显示;动作通过 RPC 发给主机)。
+func apply_snapshot(snap: Dictionary) -> void:
+	phase = snap.phase
+	current_seat = snap.current_seat
+	turn_count = snap.turn_count
+	dealer_seat = snap.dealer_seat
+	last_discard = snap.last_discard
+	peek_options = []
+	for id in snap.peek_options:
+		peek_options.append(id)
+	result = snap.result
+	wall.forced_dora = []
+	for k in snap.dora:
+		wall.forced_dora.append(k)
+	wall.forced_ura = []
+	for k in snap.ura:
+		wall.forced_ura.append(k)
+	human_options = snap.options
+	human_options["awaiting"] = snap.awaiting
+	_awaiting = []
+	for seat in snap.awaiting:
+		_awaiting.append(seat)
+	for p in players:
+		p.score = snap.scores[p.seat]
+		p.riichi = snap.riichi[p.seat]
+		p.discards_after_riichi = snap.disc_riichi[p.seat]
+		p.river = []
+		for id in snap.rivers[p.seat]:
+			p.river.append(id)
+		p.melds.clear()
+		for m in snap.melds[p.seat]:
+			p.melds.append(m)
+		var size: int = snap.hand_sizes[p.seat]
+		p.hand.clear()
+		if p.seat == snap.human_seat:
+			for id in snap.hand:
+				p.hand.append(id)
+			p.just_drawn = snap.just_drawn
+		else:
+			for i in size:
+				p.hand.append(i + 1)  # 占位 id:对手手牌仅用于显示张数
 
 
 ## 每有鸣牌(碰/杠/吃)即打断全部一发机会。

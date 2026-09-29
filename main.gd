@@ -61,11 +61,32 @@ var _cfg_bgm := 50
 var _cfg_sfx := 70
 var _cfg_bg_path := ""
 
+# 联机
+var net: MNet
+var _screen := "menu"   # menu | select | room | game
+const CHAR_THEME := {"saki": "d1495b", "hisa": "33658a", "koromo": "7768ae", "nodoka": "d8a31a",
+	"teru": "8e3b8e", "kuro": "2a6f97", "ako": "2a9d8f", "ryuuka": "4c956c", "none": "6c757d"}
+const CHAR_KANJI := {"saki": "咲", "hisa": "久", "koromo": "衣", "nodoka": "和",
+	"teru": "照", "kuro": "玄", "ako": "憧", "ryuuka": "華", "none": "素"}
+
 
 func _ready() -> void:
 	_autotest = OS.get_cmdline_user_args().has("--autotest")
 	_shots = OS.get_cmdline_user_args().has("--shots")
 	_load_settings()
+	net = MNet.new()
+	net.name = "Net"
+	add_child(net)
+	net.lobby_changed.connect(_on_net_lobby)
+	net.game_started.connect(_on_net_game_started)
+	net.snapshot_received.connect(_on_net_snapshot)
+	net.joined_ok.connect(func():
+		_build_room()
+		_refresh_room())
+	net.join_failed.connect(func(reason): 
+		_build_main_menu()
+		_menu_error(reason))
+	net.back_to_lobby.connect(func(): _build_room())
 	_build_background()
 	_build_table_bg()
 	_setup_audio()
@@ -77,9 +98,10 @@ func _ready() -> void:
 		_start_game()
 	elif _shots:
 		_picked_skill = "saki"
-		_build_select_screen()  # 先截选人界面,再自动进入对局
+		_screen = "menu"
+		_build_main_menu()  # 依次演示:主菜单 → 选人 → 房间 → 对局
 	else:
-		_build_select_screen()
+		_build_main_menu()
 
 
 # ———————————————————— 开局选人 ————————————————————
@@ -110,7 +132,7 @@ func _build_table_bg() -> void:
 
 func _clear_ui() -> void:
 	for c in get_children():
-		if c.name != "BG" and c.name != "TableBG" and not c is CanvasLayer:
+		if c.name != "BG" and c.name != "TableBG" and c.name != "Net" and not c is CanvasLayer:
 			c.queue_free()
 	_overlay = null
 	_game_root = null
@@ -289,10 +311,15 @@ func _build_badge(seat: int) -> PanelContainer:
 	v.name = "V"
 	v.add_theme_constant_override("separation", 2)
 	badge.add_child(v)
+	var head_row := HBoxContainer.new()
+	head_row.name = "HeadRow"
+	head_row.add_theme_constant_override("separation", 8)
+	v.add_child(head_row)
+	head_row.add_child(_make_avatar(table.players[seat].skill.id, 40))
 	var wind_row := HBoxContainer.new()
 	wind_row.name = "WindRow"
 	wind_row.add_theme_constant_override("separation", 6)
-	v.add_child(wind_row)
+	head_row.add_child(wind_row)
 	var wind_l := _make_label(WIND_CHARS[seat], 20, Color("ffd166"))
 	wind_l.name = "Wind"
 	wind_row.add_child(wind_l)
@@ -310,12 +337,13 @@ func _build_badge(seat: int) -> PanelContainer:
 		"bottom":
 			badge.position = Vector2(100, 700)
 		"right":
-			badge.position = Vector2(1140, 700)
+			badge.position = Vector2(1130, 700)
 		"top":
-			badge.position = Vector2(1100, 78)
+			badge.position = Vector2(1090, 78)
 		"left":
 			badge.position = Vector2(100, 78)
 	_game_root.add_child(badge)
+	_badge_refs[seat] = {"name": name_l, "score": score_l, "riichi": riichi_l, "panel": badge}
 	return badge
 
 
@@ -354,15 +382,21 @@ func _process(_delta: float) -> void:
 	if _autotest:
 		_autotest_step()
 		return
+	if net.is_client():
+		return  # 客户端由快照驱动,不自行推进
 	if table.phase == "round_end":
 		return
 	_tick += 1
 	if _tick % 18 != 0:  # 约 0.3 秒推进一步
 		return
-	# 人类决策点:不打断,等 UI 输入
-	if table.phase == "await_discard" and table.current_seat == 0:
+	# 人类决策点:不打断,等 UI 输入(联机时含远端人类)
+	if table.phase == "await_discard" and table.current_seat == 0 and not net.is_host():
 		return
-	if table.phase == "await_peek":
+	if table.phase == "await_discard" and net.is_host() and not table.players[table.current_seat].is_ai and table.current_seat != 0:
+		return
+	if table.phase == "await_peek" and not net.is_host():
+		return
+	if table.phase == "await_peek" and net.is_host() and not table.players[table.current_seat].is_ai:
 		return
 	if table.phase == "await_response" and _human_has_options():
 		return
@@ -413,8 +447,27 @@ func _autotest_step() -> void:
 func _shots_step() -> void:
 	_tick += 1
 	if _tick == 5:
+		await _save_shot("menu")
+		_build_select_screen()
+		return
+	if _tick == 10:
 		await _save_shot("select")
 		_on_pick_character("saki")
+		return
+	if _tick == 18:
+		# 演示房间页(房主视角:建房 + 补两台电脑)
+		net.my_name = "房主"
+		net.host_game()
+		net.my_char = "saki"
+		net.host_set_char("saki")
+		net.host_add_ai(1)
+		net.host_add_ai(2)
+		_build_room()
+		return
+	if _tick == 26:
+		await _save_shot("room")
+		net.leave()
+		_start_game()
 		return
 	if table == null or table.phase == "idle":
 		return
@@ -457,8 +510,11 @@ func _human_has_options() -> bool:
 	if table == null:
 		return false
 	var o: Dictionary = table.human_options
-	return o.get("ron", false) or o.get("pon", false) or o.get("kan", false) \
-		or (o.get("chi", []) as Array).size() > 0
+	if o.has("awaiting") and table.human_seat() >= 0 and (o["awaiting"] as Array).has(table.human_seat()):
+		return false  # 已响应过本轮(联机快照)
+	if (o.get("chi", []) as Array).size() > 0 or o.get("ron", false) or o.get("pon", false) or o.get("kan", false):
+		return not (o.has("awaiting") and (o["awaiting"] as Array).has(table.human_seat()))
+	return false
 
 # ———————————————————— 状态刷新 ————————————————————
 
@@ -473,19 +529,25 @@ func _refresh() -> void:
 	_refresh_buttons()
 	if table.phase == "round_end":
 		_show_result()
+	if net != null and net.is_host() and net.in_game:
+		net.broadcast_snapshot_builder(table)
+
+
+var _badge_refs := {}
 
 
 func _refresh_badges() -> void:
 	for seat in 4:
 		var p := table.players[seat]
-		var badge: PanelContainer = _badges[seat]
+		var refs: Dictionary = _badge_refs[seat]
+		var badge: PanelContainer = refs.panel
 		var sb: StyleBoxFlat = badge.get_theme_stylebox("panel")
 		var is_turn: bool = table.current_seat == seat and table.phase != "round_end"
 		sb.border_color = Color("ffd166") if is_turn else Color("ffffff22")
 		sb.border_width_bottom = 2 if is_turn else 0
-		(badge.get_node("V/WindRow/PName") as Label).text = p.display_name
-		(badge.get_node("V/Score") as Label).text = "%d 点" % p.score
-		(badge.get_node("V/Riichi") as Label).visible = p.riichi
+		(refs.name as Label).text = p.display_name
+		(refs.score as Label).text = "%d 点" % p.score
+		(refs.riichi as Label).visible = p.riichi
 
 
 func _refresh_center() -> void:
@@ -1020,6 +1082,302 @@ func _chi_label(combo: Dictionary, called_kind: int) -> String:
 	return "".join(parts)
 
 
+# ———————————————————— 主菜单 ————————————————————
+
+var _menu_error_label: Label
+var _name_edit: LineEdit
+var _code_edit: LineEdit
+
+
+func _build_main_menu() -> void:
+	_clear_ui()
+	_screen = "menu"
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22ee"), 16, 28))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	add_child(panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	panel.add_child(box)
+	box.add_child(_make_label("天才麻将少女 · 技能麻将", 32, Color("ffd166")))
+	box.add_child(_make_label("八位角色的超能力日麻 · 支持单人 / 联机(最多 4 人)", 14, Color("caf0f8")))
+
+	box.add_child(_make_label("你的名字", 13, Color("95d5b2")))
+	_name_edit = LineEdit.new()
+	_name_edit.text = net.my_name
+	_name_edit.placeholder_text = "玩家"
+	_name_edit.custom_minimum_size = Vector2(0, 36)
+	box.add_child(_name_edit)
+
+	var b_single := Button.new()
+	b_single.text = "单人游玩(vs AI)"
+	b_single.custom_minimum_size = Vector2(0, 44)
+	b_single.pressed.connect(func():
+		net.my_name = _name_edit.text
+		_build_select_screen())
+	box.add_child(b_single)
+
+	box.add_child(_make_label("—— 联机(同一局域网,或房主端口转发后用公网 IP)——", 12, Color("95d5b2aa")))
+	var b_host := Button.new()
+	b_host.text = "创建房间(获得邀请码)"
+	b_host.custom_minimum_size = Vector2(0, 44)
+	b_host.pressed.connect(func():
+		net.my_name = _name_edit.text if _name_edit.text != "" else "房主"
+		net.my_char = ""
+		var code := net.host_game()
+		if code != "":
+			_build_room()
+		else:
+			_menu_error("创建失败:端口被占用?"))
+	box.add_child(b_host)
+
+	_code_edit = LineEdit.new()
+	_code_edit.placeholder_text = "输入邀请码(SMJ…)或 IP:端口"
+	_code_edit.custom_minimum_size = Vector2(0, 36)
+	box.add_child(_code_edit)
+	var b_join := Button.new()
+	b_join.text = "加入房间"
+	b_join.custom_minimum_size = Vector2(0, 40)
+	b_join.pressed.connect(func():
+		net.my_name = _name_edit.text if _name_edit.text != "" else "玩家"
+		var err := net.join_game(_code_edit.text)
+		if err != OK:
+			_menu_error("加入失败:邀请码格式错误"))
+	box.add_child(b_join)
+	_menu_error_label = _make_label("", 12, Color("ff6b6b"))
+	box.add_child(_menu_error_label)
+
+
+func _menu_error(text: String) -> void:
+	if _menu_error_label:
+		_menu_error_label.text = text
+
+# ———————————————————— 房间页 ————————————————————
+
+var _room_list_box: VBoxContainer
+var _room_code_label: Label
+
+
+func _build_room() -> void:
+	_clear_ui()
+	_screen = "room"
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22ee"), 16, 20))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	add_child(panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	panel.add_child(box)
+	box.add_child(_make_label("房间大厅", 26, Color("ffd166")))
+	_room_code_label = _make_label("", 20, Color("caf0f8"))
+	box.add_child(_room_code_label)
+	box.add_child(_make_label("把邀请码发给朋友(局域网直接可用;跨网请端口转发后改用 公网IP:端口)", 11, Color("95d5b2aa")))
+
+	_room_list_box = VBoxContainer.new()
+	_room_list_box.add_theme_constant_override("separation", 6)
+	box.add_child(_room_list_box)
+
+	box.add_child(_make_label("选择你的角色(不能与其他人相同)", 13, Color("95d5b2")))
+	var grid := GridContainer.new()
+	grid.columns = 8
+	grid.add_theme_constant_override("h_separation", 6)
+	box.add_child(grid)
+	for cid in CHARACTER_IDS:
+		var taken := false
+		for entry in net.lobby:
+			if entry.char == cid and entry.id != multiplayer.get_unique_id() and not entry.ai:
+				taken = true
+		var slot := VBoxContainer.new()
+		var btn := Button.new()
+		btn.custom_minimum_size = Vector2(56, 56)
+		var av := _make_avatar(cid, 52)
+		av.set_anchors_preset(Control.PRESET_FULL_RECT)
+		av.set_offsets_preset(Control.PRESET_FULL_RECT)
+		av.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.add_child(av)
+		if taken:
+			btn.disabled = true
+			btn.tooltip_text = "已被选择"
+		if net.my_char == cid:
+			btn.custom_minimum_size = Vector2(62, 62)
+		btn.pressed.connect(func(): _pick_room_char(cid))
+		slot.add_child(btn)
+		grid.add_child(slot)
+
+	if net.is_host():
+		box.add_child(_make_label("—— 规则设置(房主)——", 13, Color("95d5b2")))
+		var rules_grid := GridContainer.new()
+		rules_grid.columns = 2
+		rules_grid.add_theme_constant_override("h_separation", 16)
+		box.add_child(rules_grid)
+		rules_grid.add_child(_make_label("初始点数", 13, Color("caf0f8")))
+		var score_opt := OptionButton.new()
+		for item in ["25000", "35000"]:
+			score_opt.add_item(item)
+		score_opt.selected = 0 if int(net.rules.get("start_score", 25000)) == 25000 else 1
+		score_opt.item_selected.connect(func(i): 
+			var r := net.rules.duplicate()
+			r.start_score = 25000 if i == 0 else 35000
+			net.host_set_rules(r))
+		rules_grid.add_child(score_opt)
+		rules_grid.add_child(_make_label("红宝牌", 13, Color("caf0f8")))
+		var red_opt := OptionButton.new()
+		for item in ["0", "3(标准)"]:
+			red_opt.add_item(item)
+		red_opt.selected = 0 if int(net.rules.get("red_dora", 3)) == 0 else 1
+		red_opt.item_selected.connect(func(i):
+			var r := net.rules.duplicate()
+			r.red_dora = 0 if i == 0 else 3
+			net.host_set_rules(r))
+		rules_grid.add_child(red_opt)
+		for rule_key in [["kuitan", "食断(副露断幺)"], ["ippatsu", "一发"], ["ura", "里宝"]]:
+			var cb := CheckBox.new()
+			cb.text = rule_key[1]
+			cb.button_pressed = bool(net.rules.get(rule_key[0], true))
+			cb.toggled.connect(func(on):
+				var r := net.rules.duplicate()
+				r[rule_key[0]] = on
+				net.host_set_rules(r))
+			rules_grid.add_child(cb)
+		rules_grid.add_child(_make_label("加入电脑的默认难度", 13, Color("caf0f8")))
+		var diff_opt := OptionButton.new()
+		for item in ["简单", "普通", "困难"]:
+			diff_opt.add_item(item)
+		diff_opt.selected = int(net.rules.get("ai_difficulty", 1))
+		diff_opt.item_selected.connect(func(i):
+			var r := net.rules.duplicate()
+			r.ai_difficulty = i
+			net.host_set_rules(r))
+		rules_grid.add_child(diff_opt)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 10)
+	box.add_child(btn_row)
+	if net.is_host():
+		var add_ai := Button.new()
+		add_ai.text = "添加电脑"
+		add_ai.custom_minimum_size = Vector2(0, 40)
+		add_ai.pressed.connect(func(): net.host_add_ai(int(net.rules.get("ai_difficulty", 1))))
+		btn_row.add_child(add_ai)
+		var start := Button.new()
+		start.text = "开始游戏"
+		start.custom_minimum_size = Vector2(0, 40)
+		start.pressed.connect(func(): net.host_start_game())
+		btn_row.add_child(start)
+	else:
+		btn_row.add_child(_make_label("等待房主开始…", 14, Color("caf0f8")))
+	var leave := Button.new()
+	leave.text = "退出房间"
+	leave.custom_minimum_size = Vector2(0, 40)
+	leave.pressed.connect(func():
+		net.leave()
+		_build_main_menu())
+	btn_row.add_child(leave)
+	_refresh_room()
+
+
+func _pick_room_char(cid: String) -> void:
+	net.my_char = cid
+	if net.is_host():
+		net.host_set_char(cid)
+	else:
+		net.send_set_char(cid)
+	_refresh_room()
+
+
+func _refresh_room() -> void:
+	if _screen != "room" or _room_list_box == null:
+		return
+	if _room_code_label:
+		var code_txt: String = net.room_code if net.is_host() else "(加入的房间)"
+		_room_code_label.text = "邀请码:%s" % code_txt
+	_clear_children(_room_list_box)
+	for i in 4:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		if i < net.lobby.size():
+			var entry: Dictionary = net.lobby[i]
+			row.add_child(_make_avatar(entry.char, 40))
+			var tag: String = ("AI · %s" % ["简单", "普通", "困难"][clampi(int(entry.diff), 0, 2)]) if entry.ai else entry.name
+			row.add_child(_make_label(tag, 15, Color("ffffff")))
+			if entry.char != "":
+				row.add_child(_make_label("→ %s(%s)" % [CHAR_KANJI.get(entry.char, ""), MSkills.create(entry.char).title], 13, Color("ffd166")))
+			if entry.id == 1:
+				row.add_child(_make_label("房主", 13, Color("95d5b2")))
+			if net.is_host() and entry.ai:
+				var diff_opt := OptionButton.new()
+				for item in ["简单", "普通", "困难"]:
+					diff_opt.add_item(item)
+				diff_opt.selected = clampi(int(entry.diff), 0, 2)
+				var slot := i
+				diff_opt.item_selected.connect(func(sel): net.host_set_diff(slot, sel))
+				row.add_child(diff_opt)
+				var rm := Button.new()
+				rm.text = "移除"
+				rm.pressed.connect(func(): net.host_remove_ai(slot))
+				row.add_child(rm)
+		else:
+			row.add_child(_make_label("(空位:开始时自动补充电脑)", 13, Color("6c757d")))
+		_room_list_box.add_child(row)
+
+
+func _on_net_lobby() -> void:
+	_refresh_room()
+
+
+# ———————————————————— 联机对局接线 ————————————————————
+
+func _on_net_game_started(args: Dictionary) -> void:
+	_start_net_game(args)
+
+
+func _on_net_snapshot(snap: Dictionary) -> void:
+	if table:
+		table.apply_snapshot(snap)
+		_refresh()
+
+
+func _start_net_game(args: Dictionary) -> void:
+	_clear_ui()
+	_mode = ""
+	_screen = "game"
+	var chars: Array = args.chars
+	table = MTable.new()
+	table.setup(chars, net.my_seat if net.is_client() else 0, args.seed, 0, net.rules)
+	for i in 4:
+		table.players[i].is_ai = int(args.humans[i]) == 0
+		table.players[i].ai_difficulty = int(args.diffs[i])
+	for entry in net.lobby:
+		if entry.ai:
+			continue
+		for i in 4:
+			if int(args.humans[i]) == int(entry.id):
+				table.players[i].display_name = entry.name
+	net.bind_table(table)
+	table.start_round(args.seed)
+	_build_game_ui()
+	_refresh()
+
+
+func _net_act(kind: String, args: Dictionary = {}) -> bool:
+	## 联机时动作改走网络;离线返回 false 走本地逻辑。
+	if not net.is_online():
+		return false
+	var payload := {"kind": kind}
+	for k in args:
+		payload[k] = args[k]
+	if net.is_host():
+		net.apply_action(net.my_seat, payload)
+		_refresh()
+	else:
+		net.send_action(payload)
+	return true
+
+
 func _can_tsumo() -> bool:
 	var me := table.players[0]
 	return table.phase == "await_discard" and table.current_seat == 0 \
@@ -1040,9 +1398,14 @@ func _on_tile_clicked(index: int) -> void:
 			_saki_index = index
 			_mode = "saki_delta"
 		"riichi":
+			if _net_act("riichi", {"index": index}):
+				_mode = ""
+				return
 			if table.human_riichi(index):
 				_mode = ""
 		_:
+			if _net_act("discard", {"index": index}):
+				return
 			table.human_discard(index)
 	_refresh()
 
@@ -1053,6 +1416,8 @@ func _on_mode_saki() -> void:
 
 
 func _on_mode_hisa() -> void:
+	if _net_act("hisa"):
+		return
 	table.human_use_hisa()
 	_refresh()
 
@@ -1068,69 +1433,97 @@ func _on_cancel_mode() -> void:
 
 
 func _on_saki_plus() -> void:
+	if _net_act("saki", {"index": _saki_index, "delta": 1}):
+		_mode = ""
+		return
 	table.human_use_saki(_saki_index, 1)
 	_mode = ""
 	_refresh()
 
 
 func _on_saki_minus() -> void:
+	if _net_act("saki", {"index": _saki_index, "delta": -1}):
+		_mode = ""
+		return
 	table.human_use_saki(_saki_index, -1)
 	_mode = ""
 	_refresh()
 
 
 func _on_pick_peek(index: int) -> void:
+	if _net_act("peek", {"index": index}):
+		return
 	table.human_choose_peek(index)
 	_refresh()
 
 
 func _on_human_ron() -> void:
+	if _net_act("ron"):
+		return
 	table.human_ron()
 	_mode = ""
 	_refresh()
 
 
 func _on_human_pon() -> void:
+	if _net_act("pon"):
+		return
 	table.human_pon()
 	_refresh()
 
 
 func _on_human_kan() -> void:
+	if _net_act("kan"):
+		return
 	table.human_kan()
 	_refresh()
 
 
 func _on_human_chi(combo_index: int) -> void:
+	if _net_act("chi", {"combo": combo_index}):
+		return
 	table.human_chi(combo_index)
 	_refresh()
 
 
 func _on_human_kakan(hand_index: int) -> void:
+	if _net_act("kakan", {"index": hand_index}):
+		return
 	table.human_kakan(hand_index)
 	_refresh()
 
 
 func _on_human_mulligan() -> void:
+	if _net_act("mulligan"):
+		return
 	table.human_use_mulligan()
 	_refresh()
 
 
 func _on_human_ako() -> void:
+	if _net_act("ako"):
+		return
 	table.human_use_ako()
 	_refresh()
 
 
 func _on_human_decline() -> void:
+	if _net_act("decline"):
+		return
 	table.human_decline()
 	_refresh()
 
 
 func _on_human_tsumo() -> void:
+	if _net_act("tsumo"):
+		return
 	table.human_tsumo()
 	_refresh()
 
 
 func _on_human_ankan(index: int) -> void:
+	if _net_act("ankan", {"index": index}):
+		return
 	table.human_ankan(index)
 	_refresh()
 
@@ -1187,11 +1580,23 @@ func _show_result() -> void:
 		grid.add_child(_make_label(p.display_name, 15, Color("ffffff")))
 		grid.add_child(_make_label(str(p.score), 15, Color("caf0f8")))
 		grid.add_child(_make_label("%+d" % d, 15, Color("ff6b6b") if d < 0 else Color("95d5b2")))
-	var btn := Button.new()
-	btn.text = "再来一局"
-	btn.custom_minimum_size = Vector2(0, 40)
-	btn.pressed.connect(_on_restart)
-	box.add_child(btn)
+	if net.is_online():
+		if net.is_host():
+			var back := Button.new()
+			back.text = "返回房间"
+			back.custom_minimum_size = Vector2(0, 40)
+			back.pressed.connect(func():
+				net.host_back_to_lobby()
+				_build_room())
+			box.add_child(back)
+		else:
+			box.add_child(_make_label("等待房主返回房间…", 14, Color("caf0f8")))
+	else:
+		var btn := Button.new()
+		btn.text = "再来一局"
+		btn.custom_minimum_size = Vector2(0, 40)
+		btn.pressed.connect(_on_restart)
+		box.add_child(btn)
 
 # ———————————————————— 截图模式步骤 ————————————————————
 
@@ -1250,8 +1655,7 @@ func _make_char_card(sk: MSkill, cid: String) -> Control:
 	v.add_theme_constant_override("separation", 4)
 	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	v.alignment = BoxContainer.ALIGNMENT_CENTER
-	var name_l := _make_label(sk.char_name, 20, Color("ffffff"))
-	name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var name_l := _make_label(sk.char_name, 18, Color("ffffff"))
 	name_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var title_l := _make_label("「%s」" % sk.title, 14, Color("ffd166"))
 	title_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1260,12 +1664,38 @@ func _make_char_card(sk: MSkill, cid: String) -> Control:
 	desc_l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	desc_l.custom_minimum_size = Vector2(170, 76)
 	desc_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	v.add_child(name_l)
+	var head := HBoxContainer.new()
+	head.alignment = BoxContainer.ALIGNMENT_CENTER
+	head.add_theme_constant_override("separation", 6)
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head.add_child(_make_avatar(cid, 30))
+	head.add_child(name_l)
+	v.add_child(head)
 	v.add_child(title_l)
 	v.add_child(desc_l)
 	btn.add_child(v)
 	btn.pressed.connect(_on_pick_character.bind(cid))
 	return btn
+
+
+## 角色头像:主题色圆 + 角色首字(程序绘制,无需美术素材)。
+func _make_avatar(char_id: String, size: float) -> Control:
+	var avatar := Panel.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(CHAR_THEME.get(char_id, "6c757d"))
+	for side in ["corner_radius_top_left", "corner_radius_top_right", "corner_radius_bottom_left", "corner_radius_bottom_right"]:
+		sb.set(side, int(size / 2.0))
+	avatar.add_theme_stylebox_override("panel", sb)
+	avatar.custom_minimum_size = Vector2(size, size)
+	avatar.size = Vector2(size, size)
+	var l := _make_label(CHAR_KANJI.get(char_id, "素"), int(size * 0.5), Color("ffffff"))
+	l.set_anchors_preset(Control.PRESET_FULL_RECT)
+	l.set_offsets_preset(Control.PRESET_FULL_RECT)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	avatar.add_child(l)
+	return avatar
 
 
 ## 麻将牌(正面):白底圆角 + 数字/花色文字;红宝牌着红。clickable 包 Button。

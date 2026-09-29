@@ -8,11 +8,19 @@ extends RefCounted
 ##   久技能:开局两次“認識の改変”主动预约。
 
 
+## AI 难度:0 简单 / 1 普通 / 2 困难(人类玩家无此字段时按普通处理)。
+static func _diff(player) -> int:
+	var v = player.get("ai_difficulty")
+	return 1 if v == null else int(v)
+
+
 ## 返回应打出的手牌下标(打牌阶段,手牌为摸牌后的张数)。
-## 性能:受入数计算(每候选 34 次 shanten)只在并列候选 ≤ 6 时进行,
-## 其余情况用孤张度 tie-break,避免模拟大量对局时单步耗时失控。
+## 简单:在“最优向听 +1”以内的候选里随机;普通:最小向听 + 孤张度;
+## 困难:普通基础上并列时比较受入数,对手立直时加强现物防守。
+## 性能:受入数计算(每候选 34 次 shanten)只在困难难度且并列候选 ≤ 6 时进行。
 static func choose_discard(table, player) -> int:
 	var n: int = player.hand.size()
+	var diff := _diff(player)
 	# 第一遍:找最小向听与并列候选
 	var shantens: Array[int] = []
 	var best_shanten := 99
@@ -26,11 +34,18 @@ static func choose_discard(table, player) -> int:
 		elif s == best_shanten:
 			tied.append(i)
 	# 第二遍:并列者比较受入种类数与孤张度
+	if diff == 0:
+		# 简单:最优向听 +1 以内随机
+		var pool: Array[int] = []
+		for i in n:
+			if shantens[i] <= best_shanten + 1:
+				pool.append(i)
+		return pool[table.rng.randi_range(0, pool.size() - 1)] if pool.size() > 0 else tied[0]
 	var best_idx: int = tied[0]
 	var best_ukeire := -1
 	var best_float := 99
 	var defend := _need_defense(table, player)
-	var use_ukeire := tied.size() <= 6 and best_shanten <= 2
+	var use_ukeire := diff >= 2 and tied.size() <= 6 and best_shanten <= 2
 	for i in tied:
 		var u := MShanten.ukeire_kinds(_without(player.hand, i), player.melds.size()) if use_ukeire else 0
 		var float_score := _isolation(player.hand[i], player.hand)
@@ -109,8 +124,10 @@ static func find_pm_move(player) -> Dictionary:
 	return {}
 
 
-## 碰:仅当降低向听。
+## 碰:仅当降低向听;简单难度不鸣牌。
 static func wants_pon(table, player, kind: int) -> bool:
+	if _diff(player) == 0:
+		return false
 	var counts: Array[int] = player.concealed_counts()
 	if counts[kind] < 2:
 		return false
@@ -141,7 +158,10 @@ static func chi_combos(player, kind: int) -> Array:
 
 
 ## AI 吃:选使向听最低的组合;向听下降,或已在 1 向听内(食断速攻)时吃。
+## 简单难度不吃。
 static func choose_chi(table, player, combos: Array) -> int:
+	if _diff(player) == 0:
+		return -1
 	var kind: int = table.last_discard.kind
 	var before := MShanten.for_tiles(player.hand, player.melds.size())
 	var best_i := -1
@@ -169,6 +189,8 @@ static func choose_chi(table, player, combos: Array) -> int:
 
 ## 加杠:手中第 4 张与已有明碰同种,且向听不劣化(注意抢杠风险由响应窗口处理)。
 static func wants_kakan(table, player) -> int:
+	if _diff(player) == 0:
+		return -1
 	var pon_kinds := {}
 	for m in player.melds:
 		if m.type == "pon":

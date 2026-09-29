@@ -10,11 +10,13 @@ var ids: Array[int] = []           # 牌山本体;数组尾部 = 下一张要摸
 var dead_wall: Array[int] = []     # 王牌 14 张(岭上牌从其头部取)
 var dora_indicators: Array[int] = []  # 已翻开的宝牌指示牌 kind
 var ura_indicators: Array[int] = []   # 里宝指示牌 kind(立直和牌时开示)
+var forced_dora: Array[int] = []      # 联机副本:主机下发的宝牌 kind(非空时优先)
+var forced_ura: Array[int] = []       # 联机副本:主机下发的里宝 kind
 var rng := RandomNumberGenerator.new()
 
 
 ## seed 相同 => 牌山序列完全可复现(无头测试依赖这一点)。
-func setup(seed_value: int) -> void:
+func setup(seed_value: int, red_dora: int = 3) -> void:
 	rng.seed = seed_value
 	ids.clear()
 	dead_wall.clear()
@@ -22,6 +24,16 @@ func setup(seed_value: int) -> void:
 	ura_indicators.clear()
 	for id in MTile.TOTAL_TILES:
 		ids.append(id)
+	# 红宝牌数量可配:超出部分按 id 从大到小移除(确定性)
+	if red_dora < 3:
+		var red_ids: Array[int] = []
+		for id in ids:
+			if MTile.is_red(id):
+				red_ids.append(id)
+		red_ids.sort()
+		red_ids.reverse()
+		for i in mini(3 - red_dora, red_ids.size()):
+			ids.erase(red_ids[i])
 	_shuffle(ids)
 	# 标准:王牌 14 张置于墙尾之外。这里从洗好的数组尾部划出 14 张,
 	# 其中翻 1 张宝牌指示牌(里宝指示牌同时定好但扣置)。
@@ -179,16 +191,20 @@ func _reveal_dora() -> void:
 		ura_indicators.append(MTile.kind_of(dead_wall[idx - 1]))
 
 
-## 宝牌实体 kind 列表(指示牌的下一张)。
+## 宝牌实体 kind 列表(指示牌的下一张);联机副本模式下由主机快照直接下发。
 func dora_kinds() -> Array[int]:
+	if forced_dora.size() > 0:
+		return forced_dora.duplicate()
 	var out: Array[int] = []
 	for ind in dora_indicators:
 		out.append(_next_kind(ind))
 	return out
 
 
-## 里宝 kind 列表(仅立直和牌时由 Table 传入役判定)。
+## 里宝 kind 列表(仅立直和牌时由 Table 传入役判定);联机副本由快照下发。
 func ura_kinds() -> Array[int]:
+	if forced_ura.size() > 0:
+		return forced_ura.duplicate()
 	var out: Array[int] = []
 	for ind in ura_indicators:
 		out.append(_next_kind(ind))

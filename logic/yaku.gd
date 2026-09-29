@@ -277,7 +277,8 @@ static func _score_sets(sets: Array, pair_kind: int, melds: Array, ctx: Dictiona
 		if k != pair_kind and MTile.is_terminal(k):
 			all_simple = false
 			break
-	if all_simple:
+	# 食断规则:副露手是否允许断幺九(规则可关)
+	if all_simple and (ctx.get("kuitan", true) or melds.is_empty()):
 		yaku.append("断幺九")
 		han += 1
 
