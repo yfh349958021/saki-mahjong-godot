@@ -64,6 +64,9 @@ var _settings_layer: CanvasLayer
 var _analyze_panel: PanelContainer
 var _analyze_label: Label
 var _analyze_on := false
+var _ana_dragging := false
+var _ana_drag_off := Vector2.ZERO
+var _confirm_exit_panel: PanelContainer
 var _settings_panel: PanelContainer
 var _table_bg: TextureRect
 var _bgm_player: AudioStreamPlayer
@@ -524,12 +527,11 @@ func _save_shot(tag: String) -> void:
 func _human_has_options() -> bool:
 	if table == null:
 		return false
+	if not table.is_seat_awaiting(table.human_seat()):
+		return false  # 已响应过本轮(联机/本地一致)
 	var o: Dictionary = table.human_options
-	if o.has("awaiting") and table.human_seat() >= 0 and (o["awaiting"] as Array).has(table.human_seat()):
-		return false  # 已响应过本轮(联机快照)
-	if (o.get("chi", []) as Array).size() > 0 or o.get("ron", false) or o.get("pon", false) or o.get("kan", false):
-		return not (o.has("awaiting") and (o["awaiting"] as Array).has(table.human_seat()))
-	return false
+	return o.get("ron", false) or o.get("pon", false) or o.get("kan", false) \
+		or (o.get("chi", []) as Array).size() > 0
 
 # ———————————————————— 状态刷新 ————————————————————
 
@@ -617,7 +619,9 @@ func _refresh_rivers() -> void:
 						node = _make_rotated_tile(tile_id, false)
 					var col := i / 6
 					var row := i % 6
-					pos = Vector2(928 + col * 46, 655 - row * 33)
+					var col_tiles := clampi(river.size() - col * 6, 0, 6)
+					var col_h := col_tiles * (MINI_W + 2)
+					pos = Vector2(928 + col * 46, 470 - col_h / 2.0 + row * (MINI_W + 2))
 				"left":
 					# 上家:竖列,牌面顺时针 90°(顶边朝桌心);
 					# 该家视角从左到右 = 我们从上往下;自靠近桌心一列向该家延伸
@@ -627,7 +631,9 @@ func _refresh_rivers() -> void:
 						node = _make_rotated_tile(tile_id, true)
 					var col3 := i / 6
 					var row3 := i % 6
-					pos = Vector2(420 - col3 * 46, 230 + row3 * 33)
+					var col_tiles3 := clampi(river.size() - col3 * 6, 0, 6)
+					var col_h3 := col_tiles3 * (MINI_W + 2)
+					pos = Vector2(420 - col3 * 46, 300 - col_h3 / 2.0 + row3 * (MINI_W + 2))
 				"top":
 					if _is_riichi_discard(seat, tile_id):
 						node = _make_rotated_tile(tile_id, true)
@@ -651,6 +657,11 @@ func _refresh_rivers() -> void:
 				node.set_meta("called", true)
 			container.add_child(node)
 			_collect_highlight(node, tile_id)
+		if seat == 0:
+			# 容器设置实际包围尺寸(拖拽落点判定依赖 get_global_rect)
+			var cols_b := mini(6, maxi(1, river.size()))
+			var rows_b := ceili(river.size() / 6.0)
+			container.size = Vector2(cols_b * (MINI_W + 2), rows_b * (MINI_H + 1))
 		if seat == 0 and _hover_kind >= 0:
 			_apply_river_highlight(_hover_kind, true)
 
@@ -806,7 +817,7 @@ func _handle_hand_release(mouse_pos: Vector2) -> void:
 	if moved:
 		# 拖拽:松手位置严格落在自家牌河矩形内 = 立即打出(手牌刷新,牌出现在牌河);
 		# 否则落回原槽位
-		var grid: GridContainer = _river_grids[0]
+		var grid: Control = _river_grids[0]
 		var rect: Rect2 = grid.get_global_rect()
 		_drag_control = null  # 控件仍在手牌容器内,由刷新统一处理
 		if rect.has_point(mouse_pos):
@@ -911,62 +922,54 @@ func _back_offset(seat: int, index: int) -> Vector2:
 
 func _refresh_buttons() -> void:
 	_clear_children(_action_box)
-	var rows := HBoxContainer.new()
-	rows.alignment = BoxContainer.ALIGNMENT_END
-	rows.add_theme_constant_override("separation", 6)
-	_action_box.add_child(rows)
+	var defs: Array = []
 	if table.phase == "round_end":
-		var again := Button.new()
-		again.text = "再来一局(重新发牌)"
-		again.custom_minimum_size = Vector2(0, 36)
-		again.pressed.connect(_on_restart)
-		rows.add_child(again)
-		_place_rows(rows)
+		defs.append({"text": "再来一局(重新发牌)", "cb": _on_restart, "color": Color("2d6a4f")})
+		_layout_action_buttons(defs)
 		return
 	if table.phase == "await_peek":
 		for i in table.peek_options.size():
-			var b := Button.new()
-			b.text = "取 %s" % MTile.label_id(table.peek_options[i])
-			b.custom_minimum_size = Vector2(0, 40)
-			b.pressed.connect(_on_pick_peek.bind(i))
-			rows.add_child(b)
-		_place_rows(rows)
+			defs.append({"text": "取 %s" % MTile.label_id(table.peek_options[i]),
+				"cb": _on_pick_peek.bind(i), "color": Color("2d6a4f")})
+		_layout_action_buttons(defs)
 		return
 	if _human_has_options():
 		var o: Dictionary = table.human_options
 		if o.get("ron", false):
-			rows.add_child(_make_action_button("荣", _on_human_ron, Color("c1121f")))
+			defs.append({"text": "荣", "cb": _on_human_ron, "color": Color("c1121f")})
 		if o.get("pon", false):
-			rows.add_child(_make_action_button("碰", _on_human_pon, Color("2a6f97")))
+			defs.append({"text": "碰", "cb": _on_human_pon, "color": Color("2a6f97")})
 		if o.get("kan", false):
-			rows.add_child(_make_action_button("杠", _on_human_kan, Color("2a6f97")))
+			defs.append({"text": "杠", "cb": _on_human_kan, "color": Color("2a6f97")})
 		var combos: Array = o.get("chi", [])
 		for ci in combos.size():
 			var combo: Dictionary = combos[ci]
-			rows.add_child(_make_action_button("吃 %s" % _chi_label(combo, table.last_discard.kind), _on_human_chi.bind(ci), Color("2a6f97")))
-		rows.add_child(_make_action_button("跳过", _on_human_decline, Color("495057")))
-		_place_rows(rows)
+			defs.append({"text": "吃 %s" % _chi_label(combo, table.last_discard.kind),
+				"cb": _on_human_chi.bind(ci), "color": Color("2a6f97")})
+		defs.append({"text": "跳过", "cb": _on_human_decline, "color": Color("495057")})
+		_layout_action_buttons(defs)
 		return
 	var me := table.players[0]
 	if not (table.phase == "await_discard" and table.current_seat == 0):
 		return
 	if _mode == "saki_delta":
-		rows.add_child(_make_action_button("+1", _on_saki_plus, Color("b5179e")))
-		rows.add_child(_make_action_button("-1", _on_saki_minus, Color("b5179e")))
-		rows.add_child(_make_action_button("取消", _on_cancel_mode, Color("495057")))
+		defs.append({"text": "+1", "cb": _on_saki_plus, "color": Color("b5179e")})
+		defs.append({"text": "-1", "cb": _on_saki_minus, "color": Color("b5179e")})
+		defs.append({"text": "取消", "cb": _on_cancel_mode, "color": Color("495057")})
+		_layout_action_buttons(defs)
 		return
 	if me.skill.id == "saki" and me.skill.uses_left > 0:
-		rows.add_child(_make_action_button("咲「+1/-1」×%d" % me.skill.uses_left, _on_mode_saki, Color("b5179e")))
+		defs.append({"text": "咲「+1/-1」×%d" % me.skill.uses_left, "cb": _on_mode_saki, "color": Color("b5179e")})
 	if me.skill.id == "hisa" and me.skill.uses_left > 0 and me.pending_peek == 0:
-		rows.add_child(_make_action_button("久「改変」×%d" % me.skill.uses_left, _on_mode_hisa, Color("b5179e")))
+		defs.append({"text": "久「改変」×%d" % me.skill.uses_left, "cb": _on_mode_hisa, "color": Color("b5179e")})
 	if me.skill.id == "ryuuka" and me.skill.uses_left > 0 and me.just_drawn >= 0:
-		rows.add_child(_make_action_button("龙华「雨」×%d" % me.skill.uses_left, _on_human_mulligan, Color("b5179e")))
+		defs.append({"text": "龙华「雨」×%d" % me.skill.uses_left, "cb": _on_human_mulligan, "color": Color("b5179e")})
 	if me.skill.id == "ako" and me.skill.uses_left > 0:
-		rows.add_child(_make_action_button("憧「背中」", _on_human_ako, Color("b5179e")))
+		defs.append({"text": "憧「背中」", "cb": _on_human_ako, "color": Color("b5179e")})
 	if not me.riichi and me.is_menzen() and table.has_tenpai_discard(0):
-		rows.add_child(_make_action_button("立直", _on_mode_riichi, Color("c1121f")))
+		defs.append({"text": "立直", "cb": _on_mode_riichi, "color": Color("c1121f")})
 	if _mode == "riichi":
-		rows.add_child(_make_action_button("取消", _on_cancel_mode, Color("495057")))
+		defs.append({"text": "取消立直", "cb": _on_cancel_mode, "color": Color("495057")})
 	var pon_kinds := {}
 	for m in me.melds:
 		if m.type == "pon":
@@ -974,7 +977,7 @@ func _refresh_buttons() -> void:
 	for i in me.hand.size():
 		var k2 := MTile.kind_of(me.hand[i])
 		if pon_kinds.has(k2):
-			rows.add_child(_make_action_button("加杠 %s" % MTile.label(k2), _on_human_kakan.bind(i), Color("2a6f97")))
+			defs.append({"text": "加杠 %s" % MTile.label(k2), "cb": _on_human_kakan.bind(i), "color": Color("2a6f97")})
 			break
 	for i in me.hand.size():
 		var kind := MTile.kind_of(me.hand[i])
@@ -983,11 +986,34 @@ func _refresh_buttons() -> void:
 			if MTile.kind_of(tid) == kind:
 				n += 1
 		if n == 4:
-			rows.add_child(_make_action_button("暗杠 %s" % MTile.label(kind), _on_human_ankan.bind(i), Color("2a6f97")))
+			defs.append({"text": "暗杠 %s" % MTile.label(kind), "cb": _on_human_ankan.bind(i), "color": Color("2a6f97")})
 			break
 	if _can_tsumo():
-		rows.add_child(_make_action_button("自摸!", _on_human_tsumo, Color("c1121f")))
-	_place_rows(rows)
+		defs.append({"text": "自摸!", "cb": _on_human_tsumo, "color": Color("c1121f")})
+	_layout_action_buttons(defs)
+
+
+## 行动按钮布局:每行最多 3 个,超出一行时向上追加行,整体靠右下浮于手牌上方。
+func _layout_action_buttons(defs: Array) -> void:
+	_clear_children(_action_box)
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	vbox.alignment = BoxContainer.ALIGNMENT_END
+	var rows := ceili(defs.size() / 3.0)
+	for r in rows:
+		var row := HBoxContainer.new()
+		row.alignment = BoxContainer.ALIGNMENT_END
+		row.add_theme_constant_override("separation", 8)
+		vbox.add_child(row)
+		for j in 3:
+			var idx := r * 3 + j
+			if idx >= defs.size():
+				break
+			var d: Dictionary = defs[idx]
+			row.add_child(_make_action_button(d.text, d.cb, d.color))
+	_action_box.add_child(vbox)
+	var min_size := vbox.get_combined_minimum_size()
+	vbox.position = Vector2(1020 - min_size.x, 700 - min_size.y - 8)
 
 
 func _place_rows(rows: Control) -> void:
@@ -1148,6 +1174,14 @@ func _build_settings_ui() -> void:
 	_analyze_panel.position = Vector2(60, 438)
 	_analyze_panel.custom_minimum_size = Vector2(330, 0)
 	_analyze_panel.visible = false
+	_analyze_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_analyze_panel.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+			_ana_dragging = event.pressed
+			if event.pressed:
+				_ana_drag_off = _analyze_panel.position - event.global_position
+		elif event is InputEventMouseMotion and _ana_dragging and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
+			_analyze_panel.position = event.global_position + _ana_drag_off)
 	_settings_layer.add_child(_analyze_panel)
 	var abox := VBoxContainer.new()
 	abox.add_theme_constant_override("separation", 4)
@@ -1157,6 +1191,34 @@ func _build_settings_ui() -> void:
 	_analyze_label = _make_label("", 11, Color("d8f3dc"))
 	_analyze_label.custom_minimum_size = Vector2(310, 0)
 	abox.add_child(_analyze_label)
+
+	# 退出确认弹窗
+	_confirm_exit_panel = PanelContainer.new()
+	_confirm_exit_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22f5"), 12, 16))
+	_confirm_exit_panel.position = Vector2(470, 320)
+	_confirm_exit_panel.custom_minimum_size = Vector2(340, 0)
+	_confirm_exit_panel.visible = false
+	_settings_layer.add_child(_confirm_exit_panel)
+	var cbox := VBoxContainer.new()
+	cbox.add_theme_constant_override("separation", 10)
+	_confirm_exit_panel.add_child(cbox)
+	cbox.add_child(_make_label("确定要停止本局对战并回到主菜单吗?", 15, Color("ffffff")))
+	var crows := HBoxContainer.new()
+	crows.alignment = BoxContainer.ALIGNMENT_CENTER
+	crows.add_theme_constant_override("separation", 12)
+	cbox.add_child(crows)
+	var cyes := Button.new()
+	cyes.text = "确认退出"
+	cyes.custom_minimum_size = Vector2(0, 38)
+	cyes.pressed.connect(func():
+		_confirm_exit_panel.visible = false
+		_exit_to_main_menu())
+	crows.add_child(cyes)
+	var cno := Button.new()
+	cno.text = "取消"
+	cno.custom_minimum_size = Vector2(0, 38)
+	cno.pressed.connect(func(): _confirm_exit_panel.visible = false)
+	crows.add_child(cno)
 
 	_settings_panel = PanelContainer.new()
 	_settings_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22f2"), 12, 14))
@@ -1209,6 +1271,12 @@ func _build_settings_ui() -> void:
 		_save_settings())
 	box.add_child(click_opt)
 
+	var exit_btn := Button.new()
+	exit_btn.text = "退出到主菜单"
+	exit_btn.custom_minimum_size = Vector2(0, 36)
+	exit_btn.pressed.connect(func(): _confirm_exit_panel.visible = true)
+	box.add_child(exit_btn)
+
 	box.add_child(_make_label("牌桌背景图片", 14, Color("95d5b2")))
 	var bg_row := HBoxContainer.new()
 	bg_row.add_theme_constant_override("separation", 8)
@@ -1254,6 +1322,17 @@ func _on_bg_selected(path: String) -> void:
 	var path_l := _settings_panel.get_node("VBoxContainer/BgPath") as Label
 	if path_l:
 		path_l.text = path
+
+
+func _exit_to_main_menu() -> void:
+	if net.is_online():
+		net.leave()
+	table = null
+	_mode = ""
+	_selected_hand_idx = -1
+	_press = {}
+	_drag_control = null
+	_build_main_menu()
 
 
 func _toggle_analyze() -> void:

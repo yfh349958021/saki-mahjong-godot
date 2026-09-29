@@ -1082,6 +1082,10 @@ func is_called_tile(seat: int, tile_id: int) -> bool:
 	return false
 
 
+func is_seat_awaiting(seat: int) -> bool:
+	return _awaiting.has(seat)
+
+
 func human_seat() -> int:
 	return _human_seat
 

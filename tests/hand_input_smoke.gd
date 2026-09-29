@@ -70,8 +70,7 @@ func _process(_d: float) -> bool:
 	main._on_hand_gui_input(tid2, 1, _mk_mouse(Vector2(300, 720), true))
 	main._on_hand_gui_input(tid2, 1, _mk_motion(river_c + Vector2(60, 30)))
 	main._on_hand_gui_input(tid2, 1, _mk_mouse(river_c, false))
-	var detached: bool = main._drag_control == null
-	print("[t4] 拖拽跟手 detached=", detached, " 打出 ", size_b3, "->", table.players[0].hand.size(), " 期望 ", size_b3 - 1)
+	print("[t4c] release: hand=", table.players[0].hand.size(), " 期望 ", size_b3 - 1)
 	# 拖拽:松手在牌河外 = 放回
 	force_my_turn()
 	var size_b4: int = table.players[0].hand.size()
