@@ -16,7 +16,8 @@
 saki-mahjong-godot/
 ├── project.godot          # 主场景指向空壳 scenes/main.tscn
 ├── scenes/main.tscn       # 唯一场景:一个空 root Control(纯文本手写,无编辑器拖拽)
-├── main.gd                # 表现层:Control.new()/Button.new() 等纯代码动态构建 UI
+├── main.gd                # 表现层:纯代码动态构建 UI(真实日麻桌布局:四方座次、
+│                          #   牌背、6 列牌河、立直牌横置、副露、中央宝牌指示、浮动行动按钮)
 ├── logic/                 # ─────── 逻辑层:全部 RefCounted,零 Node/UI 依赖 ───────
 │   ├── tile.gd            #   34 种牌 / 136 张实体牌编码,红宝牌,±1 平移,牌谱简写解析
 │   ├── wall.gd            #   牌山纯数组:洗牌(可复现 seed)/加权抽牌/墙顶挑选/数组重排
