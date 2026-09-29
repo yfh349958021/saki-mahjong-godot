@@ -42,17 +42,27 @@ static func choose_discard(table, player) -> int:
 				pool.append(i)
 		return pool[table.rng.randi_range(0, pool.size() - 1)] if pool.size() > 0 else tied[0]
 	var best_idx: int = tied[0]
-	var best_ukeire := -1
+	var best_score := -1
 	var best_float := 99
 	var defend := _need_defense(table, player)
-	var use_ukeire := diff >= 2 and tied.size() <= 6 and best_shanten <= 2
+	var full_efficiency := diff >= 2
+	# 同种去重:相同 kind 的候选受入相同,只算一次
+	var kind_score := {}
 	for i in tied:
-		var u := MShanten.ukeire_kinds(_without(player.hand, i), player.melds.size()) if use_ukeire else 0
+		var kind_i := MTile.kind_of(player.hand[i])
+		if not kind_score.has(kind_i):
+			if full_efficiency:
+				kind_score[kind_i] = acceptance_tiles(table, _without(player.hand, i), player.melds.size()) * 10
+			else:
+				kind_score[kind_i] = MShanten.ukeire_kinds(_without(player.hand, i), player.melds.size())
+	for i in tied:
+		var kind_i := MTile.kind_of(player.hand[i])
+		var score: int = kind_score[kind_i]
 		var float_score := _isolation(player.hand[i], player.hand)
-		if defend and player.river_has(MTile.kind_of(player.hand[i])):
+		if defend and player.river_has(kind_i):
 			float_score -= 10  # 对手立直时,现物(自己河中出现过的kind)安全加分
-		if u > best_ukeire or (u == best_ukeire and float_score < best_float):
-			best_ukeire = u
+		if score > best_score or (score == best_score and float_score < best_float):
+			best_score = score
 			best_float = float_score
 			best_idx = i
 	return best_idx
@@ -280,6 +290,36 @@ static func _without(arr: Array[int], idx: int) -> Array[int]:
 		if i != idx:
 			out.append(arr[i])
 	return out
+
+
+## 全牌效·受入枚数:打出 remaining 中一张后,统计所有能推进向听的 kind
+## 按牌山可见剩余枚数加权的总量(可见 = 全员手牌/副露/牌河)。
+## 这就是“1-受入枚数”层面的全牌效率。
+static func acceptance_tiles(table, tiles: Array[int], melds: int) -> int:
+	var counts := MTile.to_counts(tiles)
+	var base := MShanten.for_counts(counts, melds)
+	var visible := {}
+	for k in MTile.KIND_COUNT:
+		visible[k] = 0
+	for k in tiles:
+		visible[MTile.kind_of(k)] += 1
+	for p in table.players:
+		for tile_id in p.river:
+			visible[MTile.kind_of(tile_id)] += 1
+		for m in p.melds:
+			visible[m.kind] += 3 if m.type != "kan_closed" else 4
+	var total := 0
+	for kind in MTile.KIND_COUNT:
+		if counts[kind] >= 4:
+			continue
+		counts[kind] += 1
+		var s := MShanten.for_counts(counts, melds)
+		counts[kind] -= 1
+		if s < base:
+			var remaining := 4 - int(visible[kind])
+			if remaining > 0:
+				total += remaining
+	return total
 
 
 ## 孤张度:与手牌中其他牌的联系越少越该先打。
