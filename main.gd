@@ -54,6 +54,7 @@ var _hover_kind := -1
 var _selected_hand_idx := -1      # 点选浮起的手牌(实际下标)
 var _drawn_gap := false           # 本次刷新:摸牌前是否有间隔
 var _last_seen_drawn := -1        # 上次刷新时的摸牌 id(变化时清除点选)
+var _last_click_msec := 0         # 上次点击时刻(双击判定)
 var _press := {}                  # 手牌按住状态 {index,pos,moved,time,detached}
 var _hand_gesture_active := false # 一次按放手势进行中(防多张连续拖出)
 var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
@@ -260,12 +261,9 @@ func _build_game_ui() -> void:
 	_action_box.mouse_filter = Control.MOUSE_FILTER_IGNORE  # 全屏容器不拦截事件,内部按钮仍可点
 	_game_root.add_child(_action_box)
 
-	# 各家牌河(6 列)与牌墙/副露容器
+	# 各家牌河(手动布局:自家/对家 6 列横排,上下家竖列)与副露容器
 	for seat in 4:
-		var grid := GridContainer.new()
-		grid.columns = 6
-		grid.add_theme_constant_override("h_separation", 2)
-		grid.add_theme_constant_override("v_separation", 1)
+		var grid := Control.new()
 		_game_root.add_child(grid)
 		_river_grids[seat] = grid
 		if not _meld_boxes.has(seat):
@@ -281,6 +279,8 @@ func _build_game_ui() -> void:
 	_layout_seat(1)
 	_layout_seat(2)
 	_layout_seat(3)
+	for seat in 4:
+		_river_grids[seat].position = Vector2.ZERO  # 牌河子节点用全局坐标
 
 	# 座位徽章(风位/名字/分数/立直棒)
 	for seat in 4:
@@ -601,26 +601,52 @@ func _find_dora_slots() -> HBoxContainer:
 
 func _refresh_rivers() -> void:
 	for seat in 4:
-		var grid: GridContainer = _river_grids[seat]
-		_clear_children(grid)
+		var container: Control = _river_grids[seat]
+		_clear_children(container)
 		if seat == 0:
 			_river_nodes_by_kind.clear()
-		for tile_id in table.players[seat].river:
-			var side := SEAT_POS[seat] == "right" or SEAT_POS[seat] == "left"
-			var node := _make_rotated_tile(tile_id) if _is_riichi_discard(seat, tile_id) or side else _make_tile(tile_id, false, true)
-			grid.add_child(node)
-			if seat == 0:
-				var kind := MTile.kind_of(tile_id)
-				var arr: Array = _river_nodes_by_kind.get(kind, [])
-				arr.append(node)
-				_river_nodes_by_kind[kind] = arr
+		var river: Array = table.players[seat].river
+		for i in river.size():
+			var tile_id: int = river[i]
+			var node: Control
+			var pos := Vector2.ZERO
+			match SEAT_POS[seat]:
+				"right":
+					# 下家:竖列,牌面顺时针转 90°(朝向下家);
+					# 该家视角从左到右 = 我们从下往上;每 6 枚向桌心换列
+					node = _make_rotated_tile(tile_id, true)
+					var col := i / 6
+					var row := i % 6
+					pos = Vector2(1148 - col * 46, 655 - row * 33)
+				"left":
+					# 上家:竖列,牌面逆时针转 90°(朝向上家);
+					# 该家视角从左到右 = 我们从上往下;每 6 枚向桌心换列
+					node = _make_rotated_tile(tile_id, false)
+					var col3 := i / 6
+					var row3 := i % 6
+					pos = Vector2(120 + col3 * 46, 180 + row3 * 33)
+				"top":
+					if _is_riichi_discard(seat, tile_id):
+						node = _make_rotated_tile(tile_id, true)
+					else:
+						node = _make_tile(tile_id, false, true)
+					var col_t := i % 6
+					var row_t := i / 6
+					pos = Vector2(560 + col_t * (MINI_W + 2), 150 + row_t * (MINI_H + 1))
+				_:
+					if _is_riichi_discard(seat, tile_id):
+						node = _make_rotated_tile(tile_id, true)
+					else:
+						node = _make_tile(tile_id, false, true)
+					var col_b := i % 6
+					var row_b := i / 6
+					var total_b := mini(6, river.size())
+					pos = Vector2(640 - total_b * (MINI_W + 2) / 2.0 + col_b * (MINI_W + 2), 560 + row_b * (MINI_H + 1))
+			node.position = pos
+			container.add_child(node)
+			_collect_highlight(node, tile_id)
 		if seat == 0 and _hover_kind >= 0:
 			_apply_river_highlight(_hover_kind, true)
-	# 自家牌河整体左右居中
-		var n := table.players[seat].river.size()
-		if seat == 0:
-			var cols := mini(6, maxi(1, n))
-			grid.position = Vector2(640 - cols * (MINI_W + 2) / 2.0, 560)
 
 
 ## 立直宣言牌(牌河中横置):立直后(含宣言牌)的第 1 张牌河牌。
@@ -800,18 +826,21 @@ func _handle_hand_release(mouse_pos: Vector2) -> void:
 		_mode = "saki_delta"
 		_refresh()
 		return
+	var now := Time.get_ticks_msec()
 	if _cfg_click_mode == 0:
 		# 单击打出模式
 		_press = {}
 		_do_discard(idx)
 		return
-	# 双击打出模式:点选浮起,再点同一张即打出
-	if idx == _selected_hand_idx:
+	# 双击打出模式:快速双击(450ms 内)同一张 = 打出;慢速点击 = 选中/取消选中
+	if idx == _selected_hand_idx and now - _last_click_msec < 450:
 		_press = {}
+		_last_click_msec = now
 		_do_discard(idx)
 		return
 	_press = {}
-	_selected_hand_idx = idx
+	_last_click_msec = now
+	_selected_hand_idx = -1 if idx == _selected_hand_idx else idx
 	_layout_hand_row()
 
 
@@ -999,14 +1028,26 @@ func _refresh_melds() -> void:
 	_clear_children(meld_box)
 	for m in me.melds:
 		for tile_id in _meld_tile_ids(m):
-			meld_box.add_child(_make_tile(tile_id, false, true))
+			var t := _make_tile(tile_id, false, true)
+			meld_box.add_child(t)
+			_collect_highlight(t, tile_id)
 	for seat in range(1, 4):
 		var mb: HBoxContainer = _meld_boxes[seat]
 		_clear_children(mb)
 		for m in table.players[seat].melds:
 			for tile_id in _meld_tile_ids(m):
-				mb.add_child(_make_tile(tile_id, false, true))
+				var t2 := _make_tile(tile_id, false, true)
+				mb.add_child(t2)
+				_collect_highlight(t2, tile_id)
 	_layout_melds()
+
+
+## 悬停高亮:记录每种 kind 对应的牌河/副露控件。
+func _collect_highlight(node: Control, tile_id: int) -> void:
+	var kind := MTile.kind_of(tile_id)
+	var arr: Array = _river_nodes_by_kind.get(kind, [])
+	arr.append(node)
+	_river_nodes_by_kind[kind] = arr
 
 
 # ———————————————————— 设置 / 音频 ————————————————————
@@ -2033,14 +2074,14 @@ func _make_back(seat: int) -> Control:
 	return back
 
 
-## 立直宣言牌:横置 90°。
-func _make_rotated_tile(tile_id: int) -> Control:
+## 横置牌:side=true 顺时针 90°(下家/立直宣言),false 逆时针 90°(上家)。
+func _make_rotated_tile(tile_id: int, cw: bool = true) -> Control:
 	var slot := Control.new()
 	slot.custom_minimum_size = Vector2(MINI_H, MINI_W)
 	slot.size = Vector2(MINI_H, MINI_W)
 	var tile := _make_tile(tile_id, false, true)
 	tile.position = Vector2((MINI_H - MINI_W) / 2.0, (MINI_W - MINI_H) / 2.0)
-	tile.rotation = PI / 2.0
+	tile.rotation = PI / 2.0 if cw else -PI / 2.0
 	tile.pivot_offset = Vector2(MINI_W / 2.0, MINI_H / 2.0)
 	slot.add_child(tile)
 	return slot

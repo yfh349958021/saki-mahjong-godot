@@ -539,7 +539,8 @@ func human_ron() -> bool:
 
 ## 响应后处理:同步显示状态;全员(含 AI)响应完毕立即结算。
 func _after_response(seat: int) -> void:
-	human_options["awaiting"] = _awaiting.duplicate()
+	if seat == _human_seat:
+		human_options = {}  # 已响应:立即隐藏该座位的吃碰杠按钮
 	if _awaiting.is_empty() and phase == "await_response":
 		_resolve_responses()
 
@@ -1088,7 +1089,7 @@ func snapshot_for(seat: int) -> Dictionary:
 		"dora": wall.dora_kinds(), "ura": wall.ura_kinds(),
 		"wall_left": wall.tiles_left(),
 		"last_discard": last_discard, "peek_options": peek_options.duplicate(),
-		"options": (_resp.get(seat, {}) if players[seat].is_ai == false else {}),
+		"options": (_resp.get(seat, {}) if seat in _awaiting else {}),
 		"awaiting": _awaiting.duplicate(),
 		"just_drawn": players[seat].just_drawn,
 		"hand": players[seat].hand.duplicate(),
