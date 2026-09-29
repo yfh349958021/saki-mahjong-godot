@@ -250,9 +250,7 @@ func _build_game_ui() -> void:
 	_hand_box.set_offsets_preset(Control.PRESET_FULL_RECT)
 	_hand_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_game_root.add_child(_hand_box)
-	var my_melds := VBoxContainer.new()
-	my_melds.alignment = BoxContainer.ALIGNMENT_END
-	my_melds.add_theme_constant_override("separation", 4)
+	var my_melds := Control.new()
 	_game_root.add_child(my_melds)
 	_meld_boxes[0] = my_melds
 
@@ -269,10 +267,9 @@ func _build_game_ui() -> void:
 		_game_root.add_child(grid)
 		_river_grids[seat] = grid
 		if not _meld_boxes.has(seat):
-			var v := VBoxContainer.new()
-			v.add_theme_constant_override("separation", 3)
-			_game_root.add_child(v)
-			_meld_boxes[seat] = v
+			var mc := Control.new()
+			_game_root.add_child(mc)
+			_meld_boxes[seat] = mc
 		var wl := Control.new()
 		_game_root.add_child(wl)
 		_wall_labels[seat] = wl
@@ -1018,46 +1015,52 @@ func _meld_tile_ids(m: Dictionary) -> Array[int]:
 	return out
 
 
-## 副露位置:各家视角的右手侧(自家=屏幕右下;下家=上侧;对家=左侧;上家=下侧)。
-func _layout_melds() -> void:
-	for seat in 4:
-		var mb: Control = _meld_boxes[seat]
-		match SEAT_POS[seat]:
-			"bottom":
-				mb.position = Vector2(1046, 556)
-				mb.size = Vector2(234, 158)
-			"right":
-				mb.position = Vector2(1128, 92)
-			"top":
-				mb.position = Vector2(106, 88)
-			"left":
-				mb.position = Vector2(96, 548)
-
-
+## 鸣牌(副露)渲染:各家按自己的视角摆放 ——
+##   自家/对家:横向排列(对家牌面倒置 180°);上家/下家:纵向排列且牌面旋转 90°。
+## 位置一律在该家视角的右手侧;叫牌张(被鸣走的那张)红色微高亮。
 func _refresh_melds() -> void:
+	for seat in 4:
+		_clear_children(_meld_boxes[seat])
 	var me := table.players[0]
-	var meld_box: Control = _meld_boxes[0]
-	_clear_children(meld_box)
-	for m in me.melds:
-		var ids := _meld_tile_ids(m)
-		for j in ids.size():
-			var t := _make_tile(ids[j], false, true)
-			if _is_called_tile_of(m, j):
-				t.modulate = Color(1.0, 0.55, 0.5)
-			meld_box.add_child(t)
-			_collect_highlight(t, ids[j])
-	for seat in range(1, 4):
-		var mb: Control = _meld_boxes[seat]
-		_clear_children(mb)
-		for m in table.players[seat].melds:
-			var ids2 := _meld_tile_ids(m)
-			for j in ids2.size():
-				var t2 := _make_tile(ids2[j], false, true)
-				if _is_called_tile_of(m, j):
-					t2.modulate = Color(1.0, 0.55, 0.5)
-				mb.add_child(t2)
-				_collect_highlight(t2, ids2[j])
-	_layout_melds()
+	for k in me.melds.size():
+		_add_meld_row(_meld_boxes[0], me.melds[k], Vector2(820 + k * 136, 714), false)
+	for k in table.players[1].melds.size():
+		_add_meld_col(_meld_boxes[1], table.players[1].melds[k], Vector2(1152 - k * 48, 96), false)
+	for k in table.players[2].melds.size():
+		_add_meld_row(_meld_boxes[2], table.players[2].melds[k], Vector2(104 + k * 136, 24), true)
+	for k in table.players[3].melds.size():
+		_add_meld_col(_meld_boxes[3], table.players[3].melds[k], Vector2(96 + k * 48, 552), true)
+
+
+## 一组横向鸣牌(自家/对家)。upside=true 时牌面旋转 180°(对家)。
+func _add_meld_row(container: Control, m: Dictionary, base: Vector2, upside: bool) -> void:
+	var ids := _meld_tile_ids(m)
+	for j in ids.size():
+		var node := _make_tile(ids[j], false, true)
+		if upside:
+			node.rotation = PI
+			node.pivot_offset = Vector2(MINI_W / 2.0, MINI_H / 2.0)
+		if _is_called_tile_of(m, j):
+			node.modulate = Color(1.0, 0.55, 0.5)
+		node.position = base + Vector2(j * (MINI_W + 2), 0)
+		container.add_child(node)
+		_collect_highlight(node, ids[j])
+
+
+## 一组纵向鸣牌(上家/下家),牌面旋转 90°,纵向堆叠。
+func _add_meld_col(container: Control, m: Dictionary, base: Vector2, ccw: bool) -> void:
+	var ids := _meld_tile_ids(m)
+	for j in ids.size():
+		var node := _make_rotated_tile(ids[j], not ccw)
+		if _is_called_tile_of(m, j):
+			node.modulate = Color(1.0, 0.55, 0.5)
+		node.position = base + Vector2(0, j * (MINI_W + 4))
+		container.add_child(node)
+		_collect_highlight(node, ids[j])
+
+
+func _layout_melds() -> void:
+	pass  # 鸣牌位置在 _refresh_melds 中直接设置
 
 
 ## 副露中的叫牌张(被鸣走的那张)轻微红色标注。
