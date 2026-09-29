@@ -27,7 +27,7 @@ var _log_label: Label
 var _action_box: Control
 var _badges := {}
 var _river_grids := {}
-var _hand_box: HBoxContainer
+var _hand_box: Control
 var _meld_boxes := {}
 var _wall_labels := {}
 var _info_label: Label
@@ -50,6 +50,11 @@ var _tile_tex_cache := {}
 var _river_nodes_by_kind := {}   # kind -> Array[Control](自家牌河,悬停高亮用)
 var _display_map: Array[int] = []  # 显示位置 -> 手牌实际下标
 var _hover_kind := -1
+var _selected_hand_idx := -1      # 点选浮起的手牌(实际下标)
+var _drawn_gap := false           # 本次刷新:摸牌前是否有间隔
+var _press := {}                  # 手牌按住状态 {index,pos,moved,time}
+var _drag_ghost: Control
+var _skill_popup: PanelContainer
 var _settings_layer: CanvasLayer
 var _settings_panel: PanelContainer
 var _table_bg: TextureRect
@@ -234,9 +239,11 @@ func _build_game_ui() -> void:
 	_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	cbox.add_child(_hint_label)
 
-	# 自家手牌 + 副露
-	_hand_box = HBoxContainer.new()
-	_hand_box.add_theme_constant_override("separation", 3)
+	# 自家手牌 + 副露(手牌为绝对定位容器:支持点选浮起/拖拽)
+	_hand_box = Control.new()
+	_hand_box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_hand_box.set_offsets_preset(Control.PRESET_FULL_RECT)
+	_hand_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_game_root.add_child(_hand_box)
 	_meld_boxes[0] = HBoxContainer.new()
 	_meld_boxes[0].add_theme_constant_override("separation", 4)
@@ -315,7 +322,12 @@ func _build_badge(seat: int) -> PanelContainer:
 	head_row.name = "HeadRow"
 	head_row.add_theme_constant_override("separation", 8)
 	v.add_child(head_row)
-	head_row.add_child(_make_avatar(table.players[seat].skill.id, 40))
+	var badge_avatar := _make_avatar(table.players[seat].skill.id, 40)
+	badge_avatar.tooltip_text = "点击查看技能说明"
+	badge_avatar.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			_toggle_skill_popup(table.players[seat].skill, badge.get_global_rect().position + Vector2(0, -8)))
+	head_row.add_child(badge_avatar)
 	var wind_row := HBoxContainer.new()
 	wind_row.name = "WindRow"
 	wind_row.add_theme_constant_override("separation", 6)
@@ -476,6 +488,10 @@ func _shots_step() -> void:
 	if _tick == 30:
 		if _settings_panel:
 			_settings_panel.visible = true
+	if _tick == 45:
+		# 演示:点选浮起第一张手牌
+		if table and table.phase == "await_discard" and table.current_seat == 0:
+			_selected_hand_idx = 0
 	if _tick == 70:
 		# 演示:让对家立直,验证牌河横置宣言牌与立直棒
 		var rp := table.players[2]
@@ -647,14 +663,17 @@ func _refresh_hands() -> void:
 			elif table.phase == "await_response" and _human_has_options():
 				hint = "别家打牌:荣 / 碰 / 杠 / 吃?"
 	_hint_label.text = hint
+	_selected_hand_idx = -1
+	_drawn_gap = drawn_pos >= 0
 	for pos_i in _display_map.size():
 		var real_idx: int = _display_map[pos_i]
 		if pos_i == _display_map.size() - 1 and drawn_pos >= 0:
-			var gap := Control.new()
-			gap.custom_minimum_size = Vector2(TILE_W, 1)
+			var gap := ColorRect.new()
+			gap.color = Color(0, 0, 0, 0)
+			gap.size = Vector2(TILE_W, 1)
 			gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			_hand_box.add_child(gap)
-		var tile := _make_tile(hand[real_idx], true, false, real_idx)
+		var tile := _make_hand_tile(hand[real_idx], real_idx)
 		_wire_hover(tile, hand[real_idx])
 		_hand_box.add_child(tile)
 	_layout_hand_row()
@@ -682,8 +701,116 @@ func _refresh_hands() -> void:
 
 
 func _layout_hand_row() -> void:
-	var min_size := _hand_box.get_combined_minimum_size()
-	_hand_box.position = Vector2(640 - min_size.x / 2.0, 714)
+	var children := _hand_box.get_children()
+	var total := children.size() * TILE_W + (TILE_W if _drawn_gap else 0.0)
+	var x := 640 - total / 2.0
+	for i in children.size():
+		var c := children[i] as Control
+		var y := 714.0
+		# 孩子顺序即显示顺序:第 i 个孩子对应 _display_map[i](间隔空隙除外)
+		var real_idx: int = _display_map[i] if i < _display_map.size() else -1
+		if real_idx == _selected_hand_idx:
+			y -= 16  # 点选浮起
+		c.position = Vector2(x, y)
+		x += TILE_W
+		if i == children.size() - 2 and _drawn_gap:
+			x += TILE_W
+		x += 3
+
+
+## 自家手牌牌张:点选浮起;双击打出;按住拖入牌河范围松手 = 打出。
+func _make_hand_tile(tile_id: int, real_idx: int) -> Control:
+	var tile := _make_tile(tile_id, false, false)
+	tile.mouse_filter = Control.MOUSE_FILTER_STOP
+	tile.gui_input.connect(func(event: InputEvent):
+		_on_hand_gui_input(tile_id, real_idx, event))
+	return tile
+
+
+func _on_hand_gui_input(tile_id: int, real_idx: int, event: InputEvent) -> void:
+	if table == null or table.phase != "await_discard" or table.current_seat != 0:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_press = {
+				"index": real_idx, "tile_id": tile_id,
+				"pos": event.global_position, "moved": false,
+				"time": Time.get_ticks_msec(),
+			}
+		else:
+			_handle_hand_release(event.global_position)
+	elif event is InputEventMouseMotion and event.button_mask & MOUSE_BUTTON_MASK_LEFT:
+		if _press.get("index", -1) == real_idx \
+				and event.global_position.distance_to(_press.get("pos", event.global_position)) > 24.0:
+			_press["moved"] = true
+			_update_drag_ghost(tile_id, event.global_position)
+
+
+func _handle_hand_release(mouse_pos: Vector2) -> void:
+	var idx: int = _press.get("index", -1)
+	var moved: bool = _press.get("moved", false)
+	var tile_id: int = _press.get("tile_id", -1)
+	_remove_drag_ghost()
+	if idx < 0:
+		return
+	if moved:
+		# 拖拽:松手位置在自家牌河范围内 = 打出
+		var grid: GridContainer = _river_grids[0]
+		var rect: Rect2 = grid.get_global_rect().grow(30)
+		if rect.has_point(mouse_pos):
+			_do_discard(idx)
+		_press = {}
+		_layout_hand_row()
+		return
+	# 单击:模式优先(立直/咲选牌);普通模式点选浮起,双击打出
+	if _mode == "riichi":
+		_press = {}
+		if _net_act("riichi", {"index": idx}):
+			_mode = ""
+			return
+		if table.human_riichi(idx):
+			_mode = ""
+			_refresh()
+		return
+	if _mode == "saki_pick":
+		_press = {}
+		_saki_index = idx
+		_mode = "saki_delta"
+		_refresh()
+		return
+	var now := Time.get_ticks_msec()
+	if idx == _selected_hand_idx and now - int(_press.get("time", 0)) < 450:
+		_press = {}
+		_do_discard(idx)
+		return
+	_press = {}
+	_selected_hand_idx = idx
+	_layout_hand_row()
+
+
+func _do_discard(real_idx: int) -> void:
+	_selected_hand_idx = -1
+	if _net_act("discard", {"index": real_idx}):
+		return
+	table.human_discard(real_idx)
+	_refresh()
+
+
+func _update_drag_ghost(tile_id: int, mouse_pos: Vector2) -> void:
+	if _drag_ghost == null or not is_instance_valid(_drag_ghost):
+		_drag_ghost = _make_tile(tile_id, false, false)
+		_drag_ghost.modulate = Color(1, 1, 1, 0.6)
+		_drag_ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_drag_ghost.z_index = 50
+		_game_root.add_child(_drag_ghost)
+	_drag_ghost.visible = true
+	_drag_ghost.position = mouse_pos - Vector2(TILE_W / 2.0, TILE_H / 2.0)
+
+
+func _remove_drag_ghost() -> void:
+	if _drag_ghost != null and is_instance_valid(_drag_ghost):
+		_drag_ghost.queue_free()
+	_drag_ghost = null
 
 
 ## 鼠标悬停手牌时,高亮自家牌河中的同种牌(振听/现物提示)。
@@ -728,6 +855,7 @@ func _refresh_buttons() -> void:
 		again.custom_minimum_size = Vector2(0, 36)
 		again.pressed.connect(_on_restart)
 		rows.add_child(again)
+		_place_rows(rows)
 		return
 	if table.phase == "await_peek":
 		for i in table.peek_options.size():
@@ -736,6 +864,7 @@ func _refresh_buttons() -> void:
 			b.custom_minimum_size = Vector2(0, 40)
 			b.pressed.connect(_on_pick_peek.bind(i))
 			rows.add_child(b)
+		_place_rows(rows)
 		return
 	if _human_has_options():
 		var o: Dictionary = table.human_options
@@ -750,6 +879,7 @@ func _refresh_buttons() -> void:
 			var combo: Dictionary = combos[ci]
 			rows.add_child(_make_action_button("吃 %s" % _chi_label(combo, table.last_discard.kind), _on_human_chi.bind(ci), Color("2a6f97")))
 		rows.add_child(_make_action_button("跳过", _on_human_decline, Color("495057")))
+		_place_rows(rows)
 		return
 	var me := table.players[0]
 	if not (table.phase == "await_discard" and table.current_seat == 0):
@@ -767,7 +897,7 @@ func _refresh_buttons() -> void:
 		rows.add_child(_make_action_button("龙华「雨」×%d" % me.skill.uses_left, _on_human_mulligan, Color("b5179e")))
 	if me.skill.id == "ako" and me.skill.uses_left > 0:
 		rows.add_child(_make_action_button("憧「背中」", _on_human_ako, Color("b5179e")))
-	if not me.riichi and me.is_menzen():
+	if not me.riichi and me.is_menzen() and me.is_tenpai():
 		rows.add_child(_make_action_button("立直", _on_mode_riichi, Color("c1121f")))
 	if _mode == "riichi":
 		rows.add_child(_make_action_button("取消", _on_cancel_mode, Color("495057")))
@@ -791,6 +921,10 @@ func _refresh_buttons() -> void:
 			break
 	if _can_tsumo():
 		rows.add_child(_make_action_button("自摸!", _on_human_tsumo, Color("c1121f")))
+	_place_rows(rows)
+
+
+func _place_rows(rows: Control) -> void:
 	# 浮动面板定位:手牌上方右侧
 	var min_size := rows.get_combined_minimum_size()
 	rows.position = Vector2(1020 - min_size.x, 700 - min_size.y - 8)
@@ -982,6 +1116,38 @@ func _on_bg_selected(path: String) -> void:
 	var path_l := _settings_panel.get_node("VBoxContainer/BgPath") as Label
 	if path_l:
 		path_l.text = path
+
+
+## 技能说明弹窗:点头像显示,再点头像或点弹窗隐藏。
+func _toggle_skill_popup(skill: MSkill, near: Vector2) -> void:
+	if _skill_popup != null and is_instance_valid(_skill_popup):
+		if _skill_popup.visible and _skill_popup.get_meta("char_id", "") == skill.id:
+			_skill_popup.visible = false
+			return
+		_skill_popup.queue_free()
+	_skill_popup = PanelContainer.new()
+	_skill_popup.set_meta("char_id", skill.id)
+	_skill_popup.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22f5"), 12, 14))
+	_skill_popup.custom_minimum_size = Vector2(300, 0)
+	_skill_popup.mouse_filter = Control.MOUSE_FILTER_STOP
+	_skill_popup.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed:
+			_skill_popup.visible = false)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	_skill_popup.add_child(v)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	v.add_child(head)
+	head.add_child(_make_avatar(skill.id, 34))
+	var t := _make_label("%s「%s」" % [skill.char_name, skill.title], 16, Color("ffd166"))
+	head.add_child(t)
+	var d := _make_label(skill.desc, 13, Color("ffffff"))
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	d.custom_minimum_size = Vector2(280, 0)
+	v.add_child(d)
+	_skill_popup.position = Vector2(clampf(near.x, 8, 950), clampf(near.y - 40, 44, 700))
+	_settings_layer.add_child(_skill_popup)
 
 
 # —— 程序合成音频:无外部素材也能有 BGM 与打牌/鸣牌音效 ——
@@ -1301,7 +1467,14 @@ func _refresh_room() -> void:
 		row.add_theme_constant_override("separation", 10)
 		if i < net.lobby.size():
 			var entry: Dictionary = net.lobby[i]
-			row.add_child(_make_avatar(entry.char, 40))
+			var room_avatar := _make_avatar(entry.char, 40)
+			if entry.char != "":
+				var sk := MSkills.create(entry.char)
+				room_avatar.tooltip_text = "点击查看技能说明"
+				room_avatar.gui_input.connect(func(event: InputEvent):
+					if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+						_toggle_skill_popup(sk, Vector2(360, 200)))
+			row.add_child(room_avatar)
 			var tag: String = ("AI · %s" % ["简单", "普通", "困难"][clampi(int(entry.diff), 0, 2)]) if entry.ai else entry.name
 			row.add_child(_make_label(tag, 15, Color("ffffff")))
 			if entry.char != "":
