@@ -614,19 +614,25 @@ func _refresh_rivers() -> void:
 			var pos := Vector2.ZERO
 			match SEAT_POS[seat]:
 				"right":
-					# 下家:竖列,牌面顺时针转 90°(朝向下家);
-					# 该家视角从左到右 = 我们从下往上;每 6 枚向桌心换列
-					node = _make_rotated_tile(tile_id, true)
+					# 下家:竖列,牌面逆时针 90°(顶边朝桌心);
+					# 该家视角从左到右 = 我们从下往上;自靠近桌心一列向该家延伸
+					if _is_riichi_discard(seat, tile_id):
+						node = _make_tile(tile_id, false, true)  # 立直宣言牌与牌河垂直
+					else:
+						node = _make_rotated_tile(tile_id, false)
 					var col := i / 6
 					var row := i % 6
-					pos = Vector2(1148 - col * 46, 655 - row * 33)
+					pos = Vector2(928 + col * 46, 655 - row * 33)
 				"left":
-					# 上家:竖列,牌面逆时针转 90°(朝向上家);
-					# 该家视角从左到右 = 我们从上往下;每 6 枚向桌心换列
-					node = _make_rotated_tile(tile_id, false)
+					# 上家:竖列,牌面顺时针 90°(顶边朝桌心);
+					# 该家视角从左到右 = 我们从上往下;自靠近桌心一列向该家延伸
+					if _is_riichi_discard(seat, tile_id):
+						node = _make_tile(tile_id, false, true)  # 立直宣言牌与牌河垂直
+					else:
+						node = _make_rotated_tile(tile_id, true)
 					var col3 := i / 6
 					var row3 := i % 6
-					pos = Vector2(120 + col3 * 46, 180 + row3 * 33)
+					pos = Vector2(420 - col3 * 46, 230 + row3 * 33)
 				"top":
 					if _is_riichi_discard(seat, tile_id):
 						node = _make_rotated_tile(tile_id, true)
@@ -645,6 +651,9 @@ func _refresh_rivers() -> void:
 					var total_b := mini(6, river.size())
 					pos = Vector2(640 - total_b * (MINI_W + 2) / 2.0 + col_b * (MINI_W + 2), 560 + row_b * (MINI_H + 1))
 			node.position = pos
+			if table.is_called_tile(seat, tile_id):
+				node.modulate = Color(1.0, 0.55, 0.5)  # 被鸣走的牌:红色微高亮
+				node.set_meta("called", true)
 			container.add_child(node)
 			_collect_highlight(node, tile_id)
 		if seat == 0 and _hover_kind >= 0:
@@ -892,7 +901,7 @@ func _apply_river_highlight(kind: int, on: bool) -> void:
 	for c in arr:
 		if not is_instance_valid(c):
 			continue
-		c.modulate = Color(1.6, 1.4, 0.5) if on else Color(1, 1, 1)
+		c.modulate = Color(1.6, 1.4, 0.5) if on else (Color(1.0, 0.55, 0.5) if c.get_meta("called", false) else Color(1, 1, 1))
 
 
 func _back_offset(seat: int, index: int) -> Vector2:
@@ -1030,19 +1039,37 @@ func _refresh_melds() -> void:
 	var meld_box: Control = _meld_boxes[0]
 	_clear_children(meld_box)
 	for m in me.melds:
-		for tile_id in _meld_tile_ids(m):
-			var t := _make_tile(tile_id, false, true)
+		var ids := _meld_tile_ids(m)
+		for j in ids.size():
+			var t := _make_tile(ids[j], false, true)
+			if _is_called_tile_of(m, j):
+				t.modulate = Color(1.0, 0.55, 0.5)
 			meld_box.add_child(t)
-			_collect_highlight(t, tile_id)
+			_collect_highlight(t, ids[j])
 	for seat in range(1, 4):
 		var mb: Control = _meld_boxes[seat]
 		_clear_children(mb)
 		for m in table.players[seat].melds:
-			for tile_id in _meld_tile_ids(m):
-				var t2 := _make_tile(tile_id, false, true)
+			var ids2 := _meld_tile_ids(m)
+			for j in ids2.size():
+				var t2 := _make_tile(ids2[j], false, true)
+				if _is_called_tile_of(m, j):
+					t2.modulate = Color(1.0, 0.55, 0.5)
 				mb.add_child(t2)
-				_collect_highlight(t2, tile_id)
+				_collect_highlight(t2, ids2[j])
 	_layout_melds()
+
+
+## 副露中的叫牌张(被鸣走的那张)轻微红色标注。
+func _is_called_tile_of(m: Dictionary, tile_index: int) -> bool:
+	match m.type:
+		"chi":
+			return tile_index == int(m.get("called", -1))
+		"pon":
+			return tile_index == int(m.get("call", 2)) and tile_index % 3 == 2
+		"kan_open", "kan_added":
+			return tile_index == int(m.get("call", 3)) and tile_index % 4 == 3
+	return false
 
 
 ## 悬停高亮:记录每种 kind 对应的牌河/副露控件。

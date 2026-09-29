@@ -27,6 +27,7 @@ var round_number: int = 1
 var phase: String = "idle"
 var turn_count: int = 0
 var last_discard: Dictionary = {}   # {seat, tile_id, kind, kakan?(抢杠标记)}
+var called_records: Array[Dictionary] = []  # 被鸣走(碰/吃/明杠)的牌河牌记录 {seat, tile_id}
 var human_options: Dictionary = {}  # 人类可响应动作 {"ron":bool,"pon":bool,"kan":bool,"chi":Array}
 var peek_options: Array[int] = []   # await_peek 时供人类挑选的墙顶牌
 var result: Dictionary = {}
@@ -71,6 +72,7 @@ func start_round(seed_value: int) -> void:
 	turn_count = 0
 	steps_taken = 0
 	last_discard = {}
+	called_records = []
 	result = {}
 	human_options = {}
 	phase = "turn_draw"
@@ -636,7 +638,8 @@ func chi_combos_for(hand: Array, kind: int) -> Array:
 func _do_pon(p: MPlayer) -> void:
 	var kind: int = last_discard.kind
 	_remove_kinds(p, kind, 2)
-	p.melds.append({"type": "pon", "kind": kind})
+	p.melds.append({"type": "pon", "kind": kind, "call": 2})
+	_record_called(last_discard)
 	_break_ippatsu()
 	log_event("%s 碰 %s" % [p.display_name, MTile.label(kind)])
 	current_seat = p.seat
@@ -648,6 +651,7 @@ func _do_chi(p: MPlayer, combo: Dictionary) -> void:
 	for k in combo.tiles:
 		_remove_one_kind(p, k)
 	p.melds.append({"type": "chi", "kind": combo.low, "called": combo.called})
+	_record_called(last_discard)
 	_break_ippatsu()
 	log_event("%s 吃 %s(%s)" % [p.display_name, MTile.label(kind), _combo_text(combo, kind)])
 	current_seat = p.seat
@@ -657,7 +661,8 @@ func _do_chi(p: MPlayer, combo: Dictionary) -> void:
 func _do_daiminkan(p: MPlayer) -> void:
 	var kind: int = last_discard.kind
 	_remove_kinds(p, kind, 3)
-	p.melds.append({"type": "kan_open", "kind": kind})
+	p.melds.append({"type": "kan_open", "kind": kind, "call": 3})
+	_record_called(last_discard)
 	wall.reveal_extra_dora()
 	_break_ippatsu()
 	log_event("%s 大明杠 %s(宝牌指示 +1)" % [p.display_name, MTile.label(kind)])
@@ -1063,6 +1068,18 @@ func _find_pm_with_extra(p: MPlayer, extra_kind: int) -> Dictionary:
 			if win:
 				return {"index": i, "delta": delta}
 	return {}
+
+
+## 记录被鸣走(碰/吃/明杠)的牌河牌,供界面红色标注。
+func _record_called(discard: Dictionary) -> void:
+	called_records.append({"seat": discard.get("seat", 0), "tile_id": discard.get("tile_id", -1)})
+
+
+func is_called_tile(seat: int, tile_id: int) -> bool:
+	for r in called_records:
+		if r.seat == seat and r.tile_id == tile_id:
+			return true
+	return false
 
 
 func human_seat() -> int:
