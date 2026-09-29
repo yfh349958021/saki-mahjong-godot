@@ -42,11 +42,36 @@ var _tick := 0
 var _autotest := false
 var _shots := false
 
+# 贴图 / 音频 / 设置
+const RES_PRESETS := [[1280, 800], [1600, 1000], [1920, 1200], [2560, 1600], [3200, 2000], [3840, 2400]]
+const RES_NAMES := ["1280×800", "1600×1000", "1920×1200", "2560×1600", "3200×2000", "3840×2400(4K)"]
+const SETTINGS_PATH := "user://settings.cfg"
+var _tile_tex_cache := {}
+var _river_nodes_by_kind := {}   # kind -> Array[Control](自家牌河,悬停高亮用)
+var _display_map: Array[int] = []  # 显示位置 -> 手牌实际下标
+var _hover_kind := -1
+var _settings_layer: CanvasLayer
+var _settings_panel: PanelContainer
+var _table_bg: TextureRect
+var _bgm_player: AudioStreamPlayer
+var _sfx_player: AudioStreamPlayer
+var _sfx_streams: Array[AudioStream] = []
+var _cfg_res_idx := 0
+var _cfg_bgm := 50
+var _cfg_sfx := 70
+var _cfg_bg_path := ""
+
 
 func _ready() -> void:
 	_autotest = OS.get_cmdline_user_args().has("--autotest")
 	_shots = OS.get_cmdline_user_args().has("--shots")
+	_load_settings()
 	_build_background()
+	_build_table_bg()
+	_setup_audio()
+	_build_settings_ui()
+	if _cfg_res_idx > 0:
+		_apply_resolution(_cfg_res_idx, false)
 	if _autotest:
 		_picked_skill = "saki"
 		_start_game()
@@ -65,11 +90,27 @@ func _build_background() -> void:
 	bg.color = Color("123524")
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
+	_table_bg = TextureRect.new()
+	_table_bg.name = "TableBG"
+	_table_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_table_bg.set_offsets_preset(Control.PRESET_FULL_RECT)
+	_table_bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_table_bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	_table_bg.visible = false
+	add_child(_table_bg)
+
+
+func _build_table_bg() -> void:
+	if _cfg_bg_path != "" and FileAccess.file_exists(_cfg_bg_path):
+		var img := Image.load_from_file(_cfg_bg_path)
+		if img:
+			_table_bg.texture = ImageTexture.create_from_image(img)
+			_table_bg.visible = true
 
 
 func _clear_ui() -> void:
 	for c in get_children():
-		if c.name != "BG":
+		if c.name != "BG" and c.name != "TableBG" and not c is CanvasLayer:
 			c.queue_free()
 	_overlay = null
 	_game_root = null
@@ -286,6 +327,12 @@ func _clear_children(node: Node) -> void:
 
 
 func _on_table_event(text: String) -> void:
+	if text.contains("打出"):
+		_play_sfx(0)
+	elif text.contains("碰") or text.contains("杠") or text.contains("吃"):
+		_play_sfx(1)
+	elif text.contains("立直"):
+		_play_sfx(2)
 	if _log_label == null:
 		return
 	var lines := _log_label.text.split("\n")
@@ -373,6 +420,9 @@ func _shots_step() -> void:
 		return
 	if _tick == 50 or _tick == 110 or _tick == 260:
 		await _save_shot("game_%d" % _tick)
+	if _tick == 30:
+		if _settings_panel:
+			_settings_panel.visible = true
 	if _tick == 70:
 		# 演示:让对家立直,验证牌河横置宣言牌与立直棒
 		var rp := table.players[2]
@@ -471,11 +521,24 @@ func _refresh_rivers() -> void:
 	for seat in 4:
 		var grid: GridContainer = _river_grids[seat]
 		_clear_children(grid)
+		if seat == 0:
+			_river_nodes_by_kind.clear()
 		for tile_id in table.players[seat].river:
-			if _is_riichi_discard(seat, tile_id):
-				grid.add_child(_make_rotated_tile(tile_id))
-			else:
-				grid.add_child(_make_tile(tile_id, false, true))
+			var side := SEAT_POS[seat] == "right" or SEAT_POS[seat] == "left"
+			var node := _make_rotated_tile(tile_id) if _is_riichi_discard(seat, tile_id) or side else _make_tile(tile_id, false, true)
+			grid.add_child(node)
+			if seat == 0:
+				var kind := MTile.kind_of(tile_id)
+				var arr: Array = _river_nodes_by_kind.get(kind, [])
+				arr.append(node)
+				_river_nodes_by_kind[kind] = arr
+		if seat == 0 and _hover_kind >= 0:
+			_apply_river_highlight(_hover_kind, true)
+	# 自家牌河整体左右居中
+		var n := table.players[seat].river.size()
+		if seat == 0:
+			var cols := mini(6, maxi(1, n))
+			grid.position = Vector2(640 - cols * (MINI_W + 2) / 2.0, 560)
 
 
 ## 立直宣言牌(牌河中横置):立直后(含宣言牌)的第 1 张牌河牌。
@@ -487,9 +550,25 @@ func _is_riichi_discard(seat: int, tile_id: int) -> bool:
 
 
 func _refresh_hands() -> void:
-	# 自家:明牌
+	# 自家:明牌(排序显示;刚摸的牌固定在最右,与手牌留一张牌宽的间隔)
 	_clear_children(_hand_box)
 	var me := table.players[0]
+	var hand := me.hand
+	_display_map.clear()
+	for i in hand.size():
+		_display_map.append(i)
+	_display_map.sort_custom(func(a, b):
+		var ka := MTile.kind_of(hand[a])
+		var kb := MTile.kind_of(hand[b])
+		if ka != kb:
+			return ka < kb
+		if MTile.is_red(hand[a]) != MTile.is_red(hand[b]):
+			return MTile.is_red(hand[a])
+		return a < b)
+	var drawn_pos := hand.find(me.just_drawn) if me.just_drawn >= 0 else -1
+	if drawn_pos >= 0:
+		_display_map.erase(drawn_pos)
+		_display_map.append(drawn_pos)
 	var hint := ""
 	match _mode:
 		"riichi":
@@ -506,8 +585,16 @@ func _refresh_hands() -> void:
 			elif table.phase == "await_response" and _human_has_options():
 				hint = "别家打牌:荣 / 碰 / 杠 / 吃?"
 	_hint_label.text = hint
-	for i in me.hand.size():
-		_hand_box.add_child(_make_tile(me.hand[i], true, false, i))
+	for pos_i in _display_map.size():
+		var real_idx: int = _display_map[pos_i]
+		if pos_i == _display_map.size() - 1 and drawn_pos >= 0:
+			var gap := Control.new()
+			gap.custom_minimum_size = Vector2(TILE_W, 1)
+			gap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			_hand_box.add_child(gap)
+		var tile := _make_tile(hand[real_idx], true, false, real_idx)
+		_wire_hover(tile, hand[real_idx])
+		_hand_box.add_child(tile)
 	_layout_hand_row()
 
 	# 其他三家:牌背 + 数量
@@ -533,9 +620,28 @@ func _refresh_hands() -> void:
 
 
 func _layout_hand_row() -> void:
-	var n := _hand_box.get_child_count()
-	var w := n * (TILE_W + 3)
-	_hand_box.position = Vector2(640 - w / 2.0 + 40, 714)
+	var min_size := _hand_box.get_combined_minimum_size()
+	_hand_box.position = Vector2(640 - min_size.x / 2.0, 714)
+
+
+## 鼠标悬停手牌时,高亮自家牌河中的同种牌(振听/现物提示)。
+func _wire_hover(tile: Control, tile_id: int) -> void:
+	var kind := MTile.kind_of(tile_id)
+	tile.mouse_entered.connect(func():
+		_hover_kind = kind
+		_apply_river_highlight(kind, true))
+	tile.mouse_exited.connect(func():
+		if _hover_kind == kind:
+			_hover_kind = -1
+		_apply_river_highlight(kind, false))
+
+
+func _apply_river_highlight(kind: int, on: bool) -> void:
+	var arr: Array = _river_nodes_by_kind.get(kind, [])
+	for c in arr:
+		if not is_instance_valid(c):
+			continue
+		c.modulate = Color(1.6, 1.4, 0.5) if on else Color(1, 1, 1)
 
 
 func _back_offset(seat: int, index: int) -> Vector2:
@@ -674,6 +780,237 @@ func _refresh_melds() -> void:
 			for tile_id in _meld_tile_ids(m):
 				mb.add_child(_make_tile(tile_id, false, true))
 	_layout_melds()
+
+
+# ———————————————————— 设置 / 音频 ————————————————————
+
+func _load_settings() -> void:
+	var cf := ConfigFile.new()
+	if cf.load(SETTINGS_PATH) == OK:
+		_cfg_res_idx = int(cf.get_value("video", "resolution", 0))
+		_cfg_bgm = int(cf.get_value("audio", "bgm", 50))
+		_cfg_sfx = int(cf.get_value("audio", "sfx", 70))
+		_cfg_bg_path = str(cf.get_value("video", "table_bg", ""))
+	_cfg_res_idx = clampi(_cfg_res_idx, 0, RES_PRESETS.size() - 1)
+	_cfg_bgm = clampi(_cfg_bgm, 0, 100)
+	_cfg_sfx = clampi(_cfg_sfx, 0, 100)
+
+
+func _save_settings() -> void:
+	var cf := ConfigFile.new()
+	cf.set_value("video", "resolution", _cfg_res_idx)
+	cf.set_value("video", "table_bg", _cfg_bg_path)
+	cf.set_value("audio", "bgm", _cfg_bgm)
+	cf.set_value("audio", "sfx", _cfg_sfx)
+	cf.save(SETTINGS_PATH)
+
+
+func _apply_resolution(idx: int, save := true) -> void:
+	idx = clampi(idx, 0, RES_PRESETS.size() - 1)
+	_cfg_res_idx = idx
+	var preset: Array = RES_PRESETS[idx]
+	get_window().size = Vector2i(preset[0], preset[1])
+	if save:
+		_save_settings()
+
+
+func _apply_volumes() -> void:
+	AudioServer.set_bus_volume_db(1, linear_to_db(_cfg_bgm / 100.0) if _cfg_bgm > 0 else -80.0)
+	AudioServer.set_bus_volume_db(2, linear_to_db(_cfg_sfx / 100.0) if _cfg_sfx > 0 else -80.0)
+	AudioServer.set_bus_mute(1, _cfg_bgm == 0)
+	AudioServer.set_bus_mute(2, _cfg_sfx == 0)
+
+
+func _build_settings_ui() -> void:
+	_settings_layer = CanvasLayer.new()
+	_settings_layer.name = "SettingsLayer"
+	_settings_layer.layer = 10
+	add_child(_settings_layer)
+
+	var gear := Button.new()
+	gear.text = "⚙ 设置"
+	gear.position = Vector2(1160, 8)
+	gear.size = Vector2(96, 30)
+	gear.pressed.connect(func(): _settings_panel.visible = not _settings_panel.visible)
+	_settings_layer.add_child(gear)
+
+	_settings_panel = PanelContainer.new()
+	_settings_panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22f2"), 12, 14))
+	_settings_panel.position = Vector2(830, 44)
+	_settings_panel.custom_minimum_size = Vector2(426, 0)
+	_settings_panel.visible = false
+	_settings_layer.add_child(_settings_panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	_settings_panel.add_child(box)
+
+	box.add_child(_make_label("分辨率", 14, Color("95d5b2")))
+	var res_opt := OptionButton.new()
+	for n in RES_NAMES:
+		res_opt.add_item(n)
+	res_opt.selected = _cfg_res_idx
+	res_opt.item_selected.connect(func(i): _apply_resolution(i, true))
+	box.add_child(res_opt)
+
+	box.add_child(_make_label("背景音乐音量", 14, Color("95d5b2")))
+	var bgm := HSlider.new()
+	bgm.min_value = 0
+	bgm.max_value = 100
+	bgm.value = _cfg_bgm
+	bgm.value_changed.connect(func(v):
+		_cfg_bgm = int(v)
+		_apply_volumes()
+		_save_settings())
+	box.add_child(bgm)
+
+	box.add_child(_make_label("音效音量(吃 / 碰 / 杠 / 打牌 / 立直)", 14, Color("95d5b2")))
+	var sfx := HSlider.new()
+	sfx.min_value = 0
+	sfx.max_value = 100
+	sfx.value = _cfg_sfx
+	sfx.value_changed.connect(func(v):
+		_cfg_sfx = int(v)
+		_apply_volumes()
+		_save_settings())
+	box.add_child(sfx)
+
+	box.add_child(_make_label("牌桌背景图片", 14, Color("95d5b2")))
+	var bg_row := HBoxContainer.new()
+	bg_row.add_theme_constant_override("separation", 8)
+	box.add_child(bg_row)
+	var pick := Button.new()
+	pick.text = "选择图片…"
+	pick.pressed.connect(func(): _bg_dialog().popup_centered(Vector2i(720, 480)))
+	bg_row.add_child(pick)
+	var clear := Button.new()
+	clear.text = "恢复默认绿色桌面"
+	clear.pressed.connect(func():
+		_cfg_bg_path = ""
+		_table_bg.visible = false
+		_save_settings())
+	bg_row.add_child(clear)
+	var path_l := _make_label(_cfg_bg_path if _cfg_bg_path != "" else "(默认)", 10, Color("caf0f8aa"))
+	path_l.name = "BgPath"
+	path_l.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	path_l.custom_minimum_size = Vector2(0, 14)
+	box.add_child(path_l)
+
+
+var _bg_dialog_ref: FileDialog
+
+
+func _bg_dialog() -> FileDialog:
+	if _bg_dialog_ref and is_instance_valid(_bg_dialog_ref):
+		return _bg_dialog_ref
+	var dlg := FileDialog.new()
+	dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
+	dlg.filters = PackedStringArray(["*.png ; PNG 图片", "*.jpg,*.jpeg ; JPEG 图片", "*.webp ; WebP 图片"])
+	dlg.file_selected.connect(_on_bg_selected)
+	_settings_layer.add_child(dlg)
+	_bg_dialog_ref = dlg
+	return dlg
+
+
+func _on_bg_selected(path: String) -> void:
+	_cfg_bg_path = path
+	_build_table_bg()
+	_save_settings()
+	var path_l := _settings_panel.get_node("VBoxContainer/BgPath") as Label
+	if path_l:
+		path_l.text = path
+
+
+# —— 程序合成音频:无外部素材也能有 BGM 与打牌/鸣牌音效 ——
+
+func _setup_audio() -> void:
+	while AudioServer.bus_count < 3:
+		AudioServer.add_bus(AudioServer.bus_count)
+	AudioServer.set_bus_name(1, "BGM")
+	AudioServer.set_bus_name(2, "SFX")
+	_apply_volumes()
+	_sfx_streams = [_make_clack(1.0), _make_clack(0.7), _make_ding()]
+	_bgm_player = AudioStreamPlayer.new()
+	_bgm_player.bus = "BGM"
+	_bgm_player.stream = _make_bgm()
+	add_child(_bgm_player)
+	_bgm_player.play()
+	_sfx_player = AudioStreamPlayer.new()
+	_sfx_player.bus = "SFX"
+	add_child(_sfx_player)
+
+
+func _play_sfx(kind: int) -> void:
+	if _sfx_player == null or kind < 0 or kind >= _sfx_streams.size():
+		return
+	_sfx_player.stream = _sfx_streams[kind]
+	_sfx_player.play()
+
+
+func _to_wav(samples: PackedFloat32Array, looped := false) -> AudioStreamWAV:
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = 22050
+	var bytes := PackedByteArray()
+	bytes.resize(samples.size() * 2)
+	for i in samples.size():
+		bytes.encode_s16(i * 2, int(clampf(samples[i], -1.0, 1.0) * 32767.0))
+	wav.data = bytes
+	if looped:
+		wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		wav.loop_begin = 0
+		wav.loop_end = samples.size()
+	return wav
+
+
+## 麻将牌撞击声:短促噪声 + 低频体腔音。
+func _make_clack(pitch: float) -> AudioStreamWAV:
+	var n := 1400
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	for i in n:
+		var t := float(i) / 22050.0
+		var env := exp(-t * 90.0)
+		var noise := (rng.randf() * 2.0 - 1.0) * 0.5
+		var tone := sin(TAU * 900.0 * pitch * t) * 0.4
+		samples[i] = (noise + tone) * env * 0.7
+	return _to_wav(samples)
+
+
+## 立直 / 和牌提示音:清脆双音。
+func _make_ding() -> AudioStreamWAV:
+	var n := 9000
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	for i in n:
+		var t := float(i) / 22050.0
+		var env := exp(-t * 4.0)
+		var v := sin(TAU * 1318.5 * t) * 0.5
+		if t > 0.12:
+			v += sin(TAU * 1760.0 * (t - 0.12)) * 0.35 * exp(-(t - 0.12) * 5.0)
+		samples[i] = v * env * 0.6
+	return _to_wav(samples)
+
+
+## 背景音乐:低音量和风弦音垫(8 秒无缝循环)。
+func _make_bgm() -> AudioStreamWAV:
+	var n := 22050 * 8
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	var freqs := [220.0, 277.18, 329.63, 440.0]
+	var amps := [0.5, 0.35, 0.3, 0.22]
+	for i in n:
+		var t := float(i) / 22050.0
+		var v := 0.0
+		for f in freqs.size():
+			var lfo := 0.6 + 0.4 * sin(TAU * t / 8.0 + f * 1.7)
+			v += sin(TAU * freqs[f] * t) * amps[f] * lfo
+		var fade := minf(t / 1.5, minf((8.0 - t) / 1.5, 1.0))
+		samples[i] = v * 0.16 * fade
+	return _to_wav(samples, true)
 
 
 func _chi_label(combo: Dictionary, called_kind: int) -> String:
@@ -964,6 +1301,18 @@ func _make_tile(tile_id: int, clickable: bool, mini: bool = false, hand_index: i
 	else:
 		(holder as Panel).add_theme_stylebox_override("panel", sb)
 
+	# CC0 贴图(FluffyStuff/riichi-mahjong-tiles):存在则优先贴图渲染
+	var tex := _tile_tex(tile_id)
+	if tex != null:
+		var tr := TextureRect.new()
+		tr.texture = tex
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tr.set_anchors_preset(Control.PRESET_FULL_RECT)
+		tr.set_offsets_preset(Control.PRESET_FULL_RECT)
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		holder.add_child(tr)
+		return holder
 	var v := VBoxContainer.new()
 	v.set_anchors_preset(Control.PRESET_FULL_RECT)
 	v.set_offsets_preset(Control.PRESET_FULL_RECT)
@@ -978,31 +1327,62 @@ func _make_tile(tile_id: int, clickable: bool, mini: bool = false, hand_index: i
 	return holder
 
 
-## 牌背(对手手牌):深绿底 + 浅色脊线。侧位玩家横躺(宽>高),对家竖立。
+## tile_id → 贴图路径(FluffyStuff 命名),带缓存。
+func _tile_tex(tile_id: int) -> Texture2D:
+	var kind := MTile.kind_of(tile_id)
+	var name: String
+	if MTile.is_red(tile_id):
+		name = ["man5-dora", "pin5-dora", "sou5-dora"][MTile.suit(kind)]
+	elif kind < 27:
+		name = ["man", "pin", "sou"][MTile.suit(kind)] + str(MTile.rank(kind))
+	else:
+		name = ["ton", "nan", "shaa", "pei", "haku", "hatsu", "chun"][kind - 27]
+	var path := "res://assets/tiles/%s.svg" % name
+	if _tile_tex_cache.has(path):
+		return _tile_tex_cache[path]
+	var tex: Texture2D = load(path) if ResourceLoader.exists(path) else null
+	_tile_tex_cache[path] = tex
+	return tex
+
+
+func _back_tex() -> Texture2D:
+	var path := "res://assets/tiles/back.svg"
+	if not _tile_tex_cache.has(path):
+		_tile_tex_cache[path] = load(path) if ResourceLoader.exists(path) else null
+	return _tile_tex_cache[path]
+
+
+## 牌背(对手手牌):CC0 牌背贴图;侧位玩家横躺 90°,对家竖立。
 func _make_back(seat: int) -> Control:
 	var back := Panel.new()
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color("2e6b5f")
+	sb.bg_color = Color("12332e")
 	sb.corner_radius_top_left = 3
 	sb.corner_radius_top_right = 3
 	sb.corner_radius_bottom_left = 3
 	sb.corner_radius_bottom_right = 3
-	sb.border_color = Color("12332e")
-	for side in ["border_width_bottom", "border_width_top", "border_width_left", "border_width_right"]:
-		sb.set(side, 1)
 	back.add_theme_stylebox_override("panel", sb)
-	var line := ColorRect.new()
-	line.color = Color("49897c")
-	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	back.add_child(line)
-	if SEAT_POS[seat] == "top":
-		back.custom_minimum_size = Vector2(BACK_TOP_W, BACK_TOP_H)
-		line.position = Vector2(2, BACK_TOP_H / 2 - 1)
-		line.size = Vector2(BACK_TOP_W - 4, 2)
-	else:
-		back.custom_minimum_size = Vector2(BACK_SIDE_W, BACK_SIDE_H)
-		line.position = Vector2(BACK_SIDE_W / 2 - 1, 2)
-		line.size = Vector2(2, BACK_SIDE_H - 4)
+	var side := SEAT_POS[seat] != "top"
+	var w := BACK_SIDE_W if side else BACK_TOP_W
+	var h := BACK_SIDE_H if side else BACK_TOP_H
+	back.custom_minimum_size = Vector2(w, h)
+	var tex := _back_tex()
+	if tex != null:
+		var tr := TextureRect.new()
+		tr.texture = tex
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_SCALE
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if side:
+			# 横躺:竖版贴图旋转 90°,视觉为 54×36
+			tr.size = Vector2(h, w)
+			tr.rotation = PI / 2.0
+			tr.pivot_offset = tr.size / 2.0
+			tr.position = Vector2((w - h) / 2.0, (h - w) / 2.0)
+		else:
+			tr.set_anchors_preset(Control.PRESET_FULL_RECT)
+			tr.set_offsets_preset(Control.PRESET_FULL_RECT)
+		back.add_child(tr)
 	return back
 
 
