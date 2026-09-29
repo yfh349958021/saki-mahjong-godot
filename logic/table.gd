@@ -355,6 +355,8 @@ func _execute_discard(p: MPlayer, idx: int) -> void:
 	p.hand.remove_at(idx)
 	p.river.append(tile_id)
 	p.just_drawn = -1
+	if p.riichi and p.riichi_discarded:
+		p.discards_after_riichi += 1
 	last_discard = {"seat": p.seat, "tile_id": tile_id, "kind": MTile.kind_of(tile_id)}
 	log_event("%s 打出 %s" % [p.display_name, MTile.label_id(tile_id)])
 	_collect_responses()
