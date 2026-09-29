@@ -250,9 +250,11 @@ func _build_game_ui() -> void:
 	_hand_box.set_offsets_preset(Control.PRESET_FULL_RECT)
 	_hand_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_game_root.add_child(_hand_box)
-	_meld_boxes[0] = HBoxContainer.new()
-	_meld_boxes[0].add_theme_constant_override("separation", 4)
-	_game_root.add_child(_meld_boxes[0])
+	var my_melds := VBoxContainer.new()
+	my_melds.alignment = BoxContainer.ALIGNMENT_END
+	my_melds.add_theme_constant_override("separation", 4)
+	_game_root.add_child(my_melds)
+	_meld_boxes[0] = my_melds
 
 	# 行动面板(浮于手牌上方,靠右;绝对定位容器)
 	_action_box = Control.new()
@@ -267,10 +269,10 @@ func _build_game_ui() -> void:
 		_game_root.add_child(grid)
 		_river_grids[seat] = grid
 		if not _meld_boxes.has(seat):
-			var mb := HBoxContainer.new()
-			mb.add_theme_constant_override("separation", 3)
-			_game_root.add_child(mb)
-			_meld_boxes[seat] = mb
+			var v := VBoxContainer.new()
+			v.add_theme_constant_override("separation", 3)
+			_game_root.add_child(v)
+			_meld_boxes[seat] = v
 		var wl := Control.new()
 		_game_root.add_child(wl)
 		_wall_labels[seat] = wl
@@ -351,13 +353,13 @@ func _build_badge(seat: int) -> PanelContainer:
 	v.add_child(riichi_l)
 	match SEAT_POS[seat]:
 		"bottom":
-			badge.position = Vector2(100, 700)
+			badge.position = Vector2(8, 700)
 		"right":
 			badge.position = Vector2(1130, 700)
 		"top":
 			badge.position = Vector2(1090, 78)
 		"left":
-			badge.position = Vector2(100, 78)
+			badge.position = Vector2(8, 78)
 	_game_root.add_child(badge)
 	_badge_refs[seat] = {"name": name_l, "score": score_l, "riichi": riichi_l, "panel": badge}
 	return badge
@@ -742,7 +744,7 @@ func _layout_hand_row() -> void:
 		var w := DRAWN_GAP if is_gap else TILE_W
 		widths.append(w)
 		total += w + 3
-	var x := 640 - (total - 3) / 2.0  # 末尾不留分隔
+	var x := 560 - (total - 3) / 2.0  # 中心略偏左,右侧留给副露
 	for i in children.size():
 		var c := children[i] as Control
 		var y := 714.0
@@ -1007,24 +1009,25 @@ func _meld_tile_ids(m: Dictionary) -> Array[int]:
 	return out
 
 
+## 副露位置:各家视角的右手侧(自家=屏幕右下;下家=上侧;对家=左侧;上家=下侧)。
 func _layout_melds() -> void:
 	for seat in 4:
-		var mb: HBoxContainer = _meld_boxes[seat]
-		var n := mb.get_child_count()
+		var mb: Control = _meld_boxes[seat]
 		match SEAT_POS[seat]:
 			"bottom":
-				mb.position = Vector2(120, 716)
+				mb.position = Vector2(1046, 556)
+				mb.size = Vector2(234, 158)
 			"right":
-				mb.position = Vector2(924, 620)
+				mb.position = Vector2(1128, 92)
 			"top":
-				mb.position = Vector2(952, 26)
+				mb.position = Vector2(106, 88)
 			"left":
-				mb.position = Vector2(100, 620)
+				mb.position = Vector2(96, 548)
 
 
 func _refresh_melds() -> void:
 	var me := table.players[0]
-	var meld_box: HBoxContainer = _meld_boxes[0]
+	var meld_box: Control = _meld_boxes[0]
 	_clear_children(meld_box)
 	for m in me.melds:
 		for tile_id in _meld_tile_ids(m):
@@ -1032,7 +1035,7 @@ func _refresh_melds() -> void:
 			meld_box.add_child(t)
 			_collect_highlight(t, tile_id)
 	for seat in range(1, 4):
-		var mb: HBoxContainer = _meld_boxes[seat]
+		var mb: Control = _meld_boxes[seat]
 		_clear_children(mb)
 		for m in table.players[seat].melds:
 			for tile_id in _meld_tile_ids(m):
