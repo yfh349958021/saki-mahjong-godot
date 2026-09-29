@@ -52,8 +52,10 @@ var _display_map: Array[int] = []  # 显示位置 -> 手牌实际下标
 var _hover_kind := -1
 var _selected_hand_idx := -1      # 点选浮起的手牌(实际下标)
 var _drawn_gap := false           # 本次刷新:摸牌前是否有间隔
-var _press := {}                  # 手牌按住状态 {index,pos,moved,time}
-var _drag_ghost: Control
+var _press := {}                  # 手牌按住状态 {index,pos,moved,time,detached}
+var _cfg_click_mode := 1          # 打牌方式:0 单击打出 / 1 双击打出
+var _drag_control: Control        # 拖动中的牌控件(已从手牌行摘出)
+var _drag_slot := -1              # 摘出前的显示槽位(松手还原用)
 var _skill_popup: PanelContainer
 var _settings_layer: CanvasLayer
 var _settings_panel: PanelContainer
@@ -721,6 +723,7 @@ func _layout_hand_row() -> void:
 ## 自家手牌牌张:点选浮起;双击打出;按住拖入牌河范围松手 = 打出。
 func _make_hand_tile(tile_id: int, real_idx: int) -> Control:
 	var tile := _make_tile(tile_id, false, false)
+	tile.set_meta("real_idx", real_idx)
 	tile.mouse_filter = Control.MOUSE_FILTER_STOP
 	tile.gui_input.connect(func(event: InputEvent):
 		_on_hand_gui_input(tile_id, real_idx, event))
@@ -743,26 +746,34 @@ func _on_hand_gui_input(tile_id: int, real_idx: int, event: InputEvent) -> void:
 		if _press.get("index", -1) == real_idx \
 				and event.global_position.distance_to(_press.get("pos", event.global_position)) > 24.0:
 			_press["moved"] = true
-			_update_drag_ghost(tile_id, event.global_position)
+			if not _press.get("detached", false):
+				_press["detached"] = true
+				_detach_hand_tile(real_idx)
+			if _drag_control != null and is_instance_valid(_drag_control):
+				_drag_control.position = event.global_position - Vector2(TILE_W / 2.0, TILE_H / 2.0)
 
 
 func _handle_hand_release(mouse_pos: Vector2) -> void:
 	var idx: int = _press.get("index", -1)
 	var moved: bool = _press.get("moved", false)
-	var tile_id: int = _press.get("tile_id", -1)
-	_remove_drag_ghost()
 	if idx < 0:
 		return
 	if moved:
-		# 拖拽:松手位置在自家牌河范围内 = 打出
+		# 拖拽:松手位置在自家牌河范围内 = 打出(牌控件随弃);否则放回原位
 		var grid: GridContainer = _river_grids[0]
 		var rect: Rect2 = grid.get_global_rect().grow(30)
 		if rect.has_point(mouse_pos):
+			if _drag_control != null and is_instance_valid(_drag_control):
+				_drag_control.queue_free()
+				_drag_control = null
+			_press = {}
 			_do_discard(idx)
-		_press = {}
-		_layout_hand_row()
+		else:
+			_restore_hand_tile()
+			_press = {}
+			_layout_hand_row()
 		return
-	# 单击:模式优先(立直/咲选牌);普通模式点选浮起,双击打出
+	# 单击:模式优先(立直/咲选牌);之后按打牌方式设置
 	if _mode == "riichi":
 		_press = {}
 		if _net_act("riichi", {"index": idx}):
@@ -778,8 +789,13 @@ func _handle_hand_release(mouse_pos: Vector2) -> void:
 		_mode = "saki_delta"
 		_refresh()
 		return
-	var now := Time.get_ticks_msec()
-	if idx == _selected_hand_idx and now - int(_press.get("time", 0)) < 450:
+	if _cfg_click_mode == 0:
+		# 单击打出模式
+		_press = {}
+		_do_discard(idx)
+		return
+	# 双击打出模式:点选浮起,再点同一张即打出
+	if idx == _selected_hand_idx:
 		_press = {}
 		_do_discard(idx)
 		return
@@ -796,21 +812,27 @@ func _do_discard(real_idx: int) -> void:
 	_refresh()
 
 
-func _update_drag_ghost(tile_id: int, mouse_pos: Vector2) -> void:
-	if _drag_ghost == null or not is_instance_valid(_drag_ghost):
-		_drag_ghost = _make_tile(tile_id, false, false)
-		_drag_ghost.modulate = Color(1, 1, 1, 0.6)
-		_drag_ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_drag_ghost.z_index = 50
-		_game_root.add_child(_drag_ghost)
-	_drag_ghost.visible = true
-	_drag_ghost.position = mouse_pos - Vector2(TILE_W / 2.0, TILE_H / 2.0)
+## 拖拽开始:把牌控件从手牌行摘出(原位留空),挂到顶层跟手。
+func _detach_hand_tile(real_idx: int) -> void:
+	for c in _hand_box.get_children():
+		if c is Control and int(c.get_meta("real_idx", -1)) == real_idx:
+			_drag_slot = c.get_index()
+			_hand_box.remove_child(c)
+			_drag_control = c
+			_drag_control.z_index = 60
+			_drag_control.position = get_global_mouse_position() - Vector2(TILE_W / 2.0, TILE_H / 2.0)
+			_game_root.add_child(_drag_control)
+			return
 
 
-func _remove_drag_ghost() -> void:
-	if _drag_ghost != null and is_instance_valid(_drag_ghost):
-		_drag_ghost.queue_free()
-	_drag_ghost = null
+## 拖拽未打出:牌控件放回手牌行原槽位。
+func _restore_hand_tile() -> void:
+	if _drag_control != null and is_instance_valid(_drag_control):
+		_drag_control.z_index = 0
+		_hand_box.add_child(_drag_control)
+		_hand_box.move_child(_drag_control, clampi(_drag_slot, 0, _hand_box.get_child_count() - 1))
+	_drag_control = null
+	_drag_slot = -1
 
 
 ## 鼠标悬停手牌时,高亮自家牌河中的同种牌(振听/现物提示)。
@@ -987,15 +1009,18 @@ func _load_settings() -> void:
 		_cfg_bgm = int(cf.get_value("audio", "bgm", 50))
 		_cfg_sfx = int(cf.get_value("audio", "sfx", 70))
 		_cfg_bg_path = str(cf.get_value("video", "table_bg", ""))
+		_cfg_click_mode = int(cf.get_value("input", "click_mode", 1))
 	_cfg_res_idx = clampi(_cfg_res_idx, 0, RES_PRESETS.size() - 1)
 	_cfg_bgm = clampi(_cfg_bgm, 0, 100)
 	_cfg_sfx = clampi(_cfg_sfx, 0, 100)
+	_cfg_click_mode = clampi(_cfg_click_mode, 0, 1)
 
 
 func _save_settings() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("video", "resolution", _cfg_res_idx)
 	cf.set_value("video", "table_bg", _cfg_bg_path)
+	cf.set_value("input", "click_mode", _cfg_click_mode)
 	cf.set_value("audio", "bgm", _cfg_bgm)
 	cf.set_value("audio", "sfx", _cfg_sfx)
 	cf.save(SETTINGS_PATH)
@@ -1070,6 +1095,16 @@ func _build_settings_ui() -> void:
 		_apply_volumes()
 		_save_settings())
 	box.add_child(sfx)
+
+	box.add_child(_make_label("打牌方式", 14, Color("95d5b2")))
+	var click_opt := OptionButton.new()
+	click_opt.add_item("双击打出(或拖入牌河)")
+	click_opt.add_item("单击打出(或拖入牌河)")
+	click_opt.selected = _cfg_click_mode
+	click_opt.item_selected.connect(func(i):
+		_cfg_click_mode = i
+		_save_settings())
+	box.add_child(click_opt)
 
 	box.add_child(_make_label("牌桌背景图片", 14, Color("95d5b2")))
 	var bg_row := HBoxContainer.new()
