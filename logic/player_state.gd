@@ -15,6 +15,10 @@ var rinshan_flag: bool = false       # 最近一次摸牌是否来自岭上(岭�
 var skill: MSkill = null
 var score: int = 25000
 var ai_difficulty: int = 1          # AI 难度:0 简单 / 1 普通 / 2 困难
+var consec_wins: int = 0            # 宫永照:连续和牌数(连续升登)
+var first_discard_tile: int = -1    # 涩谷尧深:本局第一打弃牌 id
+var harvest_done: bool = false      # 涩谷尧深:收获季是否已发动
+var charge_turns: int = 0           # 清水谷龙华:充能剩余巡数
 var pending_peek: int = 0            # 竹井久:下一次摸牌的挑选张数
 var just_drawn: int = -1             # 最近一次摸到的实体牌 id(立直后暗杠的听牌不变判定用)
 var discards_after_riichi: int = 0   # 立直宣言后(含宣言牌)的打牌数(牌河横置牌定位用)
@@ -38,6 +42,10 @@ func reset_for_round(dealer: bool, start_score: int = 25000) -> void:
 	pending_peek = 0
 	just_drawn = -1
 	discards_after_riichi = 0
+	consec_wins = 0
+	first_discard_tile = -1
+	harvest_done = false
+	charge_turns = 0
 	score = start_score
 	if skill:
 		skill.reset_for_round()

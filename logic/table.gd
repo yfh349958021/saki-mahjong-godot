@@ -28,6 +28,7 @@ var phase: String = "idle"
 var turn_count: int = 0
 var last_discard: Dictionary = {}   # {seat, tile_id, kind, kakan?(抢杠标记)}
 var called_records: Array[Dictionary] = []  # 被鸣走(碰/吃/明杠)的牌河牌记录 {seat, tile_id}
+var jun_aura := 0                            # 井上纯:鸣牌破坏剩余巡数
 var human_options: Dictionary = {}  # 人类可响应动作 {"ron":bool,"pon":bool,"kan":bool,"chi":Array}
 var peek_options: Array[int] = []   # await_peek 时供人类挑选的墙顶牌
 var result: Dictionary = {}
@@ -68,6 +69,8 @@ func start_round(seed_value: int) -> void:
 	for r in 13:
 		for i in 4:
 			players[(dealer_seat + i) % 4].hand.append(wall.draw_top())
+	# 国广一「起手向听推进」:配牌后向有效张置换两次
+	_kazue_boost_all()
 	current_seat = dealer_seat
 	turn_count = 0
 	steps_taken = 0
@@ -77,6 +80,46 @@ func start_round(seed_value: int) -> void:
 	human_options = {}
 	phase = "turn_draw"
 	log_event("—— 第 %d 局开始,庄家:%s(%s)——" % [round_number, players[dealer_seat].display_name, SEAT_NAMES[dealer_seat]])
+
+
+## 国广一「起手向听推进」:各家配牌向有效张置换两次(牌墙中找最有效张,换出最孤张)。
+func _kazue_boost_all() -> void:
+	for p in players:
+		if p.skill == null or p.skill.id != "kazue":
+			continue
+		for round_i in 2:
+			var counts := p.concealed_counts()
+			var base := MShanten.for_counts(counts, p.melds.size())
+			var best_kind := -1
+			for kind in MTile.KIND_COUNT:
+				if counts[kind] >= 4 or wall.remaining_count(kind) <= 0:
+					continue
+				counts[kind] += 1
+				if MShanten.for_counts(counts, p.melds.size()) < base and (best_kind == -1 or true):
+					if best_kind == -1:
+						best_kind = kind
+					else:
+						# 取能最大降低向听的 kind(此处简单取第一个有效的)
+						pass
+				counts[kind] -= 1
+			if best_kind < 0:
+				break
+			# 找手中最孤张的一张换出
+			var worst_i := 0
+			var worst_score := -1
+			for i in p.hand.size():
+				var iso := MAI._isolation(p.hand[i], p.hand)
+				if iso > worst_score:
+					worst_score = iso
+					worst_i = i
+			if worst_score >= 8:
+				break  # 剩余全是字牌孤张时不强行置换
+			var got := wall.take_kind(best_kind)
+			if got < 0:
+				break
+			var out_id: int = p.hand[worst_i]
+			wall.ids.append(out_id)
+			p.hand[worst_i] = got
 
 
 ## 推进一个原子步骤。返回动作描述(UI 节奏用,无头模式可忽略)。
@@ -131,6 +174,16 @@ func _do_draw() -> void:
 	p.just_drawn = tile
 	p.hand.append(tile)
 	_expire_ippatsu(p)
+	# 涩谷尧深「收获季」
+	if p.skill != null and p.skill.id == "takakura" and not p.harvest_done \
+			and wall.tiles_left() <= 8 and p.first_discard_tile >= 0 \
+			and wall.remaining_count(MTile.kind_of(p.first_discard_tile)) > 0 \
+			and not p.hand.has(p.first_discard_tile):
+		var back: int = p.first_discard_tile
+		wall.remaining_count_back(back, p)
+	p.charge_turns = maxi(0, p.charge_turns - 1)
+	if jun_aura > 0:
+		jun_aura -= 1
 	phase = "await_discard"
 
 
@@ -142,13 +195,97 @@ func _expire_ippatsu(p: MPlayer) -> void:
 
 ## 技能钩子下的摸牌:被动加权(衣 / 和 / 玄)或普通摸牌。
 func _draw_with_skills(p: MPlayer) -> int:
+	var weights: Array = []
+	weights.resize(MTile.KIND_COUNT)
+	weights.fill(1.0)
+	var weighted := false
 	if p.skill != null and p.skill.passive_weight and not p.riichi:
-		var weights: Array = []
-		weights.resize(MTile.KIND_COUNT)
-		weights.fill(1.0)
 		p.skill.modify_draw_weights(self, p, weights)
-		return wall.draw_weighted(weights)
-	return wall.draw_top()
+		weighted = true
+	# —— 场上光环(他人技能)——
+	for other in players:
+		if other.seat == p.seat or other.skill == null:
+			continue
+		match other.skill.id:
+			"koromo":
+				# 满月支配:被稳乃封印时无效
+				if not _shizuno_seal():
+					_degrade_advancing(p, weights, 0.6)
+			"jun":
+				if jun_aura > 0:
+					_degrade_advancing(p, weights, 0.45)
+			"kajiki":
+				if other.riichi:
+					_degrade_advancing(p, weights, 0.8)
+			"kokaji":
+				if other.riichi:
+					_boost_toward_kokaji_wins(p, weights)
+	# 龙华充能
+	if p.charge_turns > 0 and p.skill != null and p.skill.id == "ryuuka":
+		var counts := p.concealed_counts()
+		var base := MShanten.for_counts(counts, p.melds.size())
+		for k in MTile.KIND_COUNT:
+			if counts[k] >= 4:
+				continue
+			counts[k] += 1
+			var st := MShanten.for_counts(counts, p.melds.size())
+			counts[k] -= 1
+			if st < base:
+				weights[k] *= 4.0
+			if st < 0:
+				weights[k] *= 8.0
+	var tile := wall.draw_weighted(weights)
+	return tile
+
+
+## 松实玄:该玩家上一张打出的牌是否为宝牌(打宝后技能短暂失效的判定)。
+func is_last_discard_dora(p: MPlayer) -> bool:
+	if p.river.is_empty():
+		return false
+	var last: int = p.river[p.river.size() - 1]
+	return kind_in_dora(MTile.kind_of(last))
+
+
+## 某 kind 是否为当前宝牌。
+func kind_in_dora(kind: int) -> bool:
+	return wall.dora_kinds().has(kind)
+
+
+## 高鸭稳乃「山深统治」封印:场上有稳乃且牌山剩 ≤30 张时,天江衣晚巡能力无效。
+func _shizuno_seal() -> bool:
+	var has_shizuno := false
+	for p in players:
+		if p.skill != null and p.skill.id == "shizuno":
+			has_shizuno = true
+	return has_shizuno and wall.tiles_left() <= 30
+
+
+## 降幅:某玩家推进向听的 kind 权重乘以 mult(进牌恶化)。
+func _degrade_advancing(p: MPlayer, weights: Array, mult: float) -> void:
+	var counts := p.concealed_counts()
+	var base := MShanten.for_counts(counts, p.melds.size())
+	for k in MTile.KIND_COUNT:
+		if counts[k] >= 4:
+			continue
+		counts[k] += 1
+		if MShanten.for_counts(counts, p.melds.size()) < base:
+			weights[k] *= mult
+		counts[k] -= 1
+
+
+## 精准射击:菫立直后,他家摸牌向菫所听的牌倾斜。
+func _boost_toward_kokaji_wins(p: MPlayer, weights: Array) -> void:
+	for other in players:
+		if other.skill != null and other.skill.id == "kokaji" and other.riichi:
+			var counts := other.concealed_counts()
+			for k in MTile.KIND_COUNT:
+				if counts[k] >= 4:
+					continue
+				counts[k] += 1
+				if MYaku.can_win(counts, other.melds.size()):
+					weights[k] *= 3.0
+				counts[k] -= 1
+			return
 
 
 ## 人类在 await_peek 中做出选择。
@@ -406,6 +543,8 @@ func _execute_discard(p: MPlayer, idx: int) -> void:
 	p.just_drawn = -1
 	if p.riichi and p.riichi_discarded:
 		p.discards_after_riichi += 1
+	if p.first_discard_tile < 0:
+		p.first_discard_tile = tile_id
 	last_discard = {"seat": p.seat, "tile_id": tile_id, "kind": MTile.kind_of(tile_id)}
 	log_event("%s 打出 %s" % [p.display_name, MTile.label_id(tile_id)])
 	_collect_responses()
@@ -1084,6 +1223,22 @@ func is_called_tile(seat: int, tile_id: int) -> bool:
 
 func is_seat_awaiting(seat: int) -> bool:
 	return _awaiting.has(seat)
+
+
+func human_charge() -> bool:
+	return player_charge(_human_seat)
+
+
+func player_charge(seat: int) -> bool:
+	if phase != "await_discard" or current_seat != seat:
+		return false
+	var p := players[seat]
+	if p.skill == null or p.skill.id != "ryuuka" or p.skill.uses_left <= 0 or p.charge_turns > 0:
+		return false
+	p.charge_turns = 5
+	p.skill.uses_left -= 1
+	log_event("%s 发动「怜的加持」—— 5 巡内进张×4、自摸×8" % p.display_name)
+	return true
 
 
 func human_seat() -> int:

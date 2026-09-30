@@ -265,57 +265,55 @@ func _test_new_yaku_rules() -> void:
 # ———————————————————— 技能:咲 ±1 ————————————————————
 
 func _test_skill_saki() -> void:
-	print("[07] 技能:宫永咲「+1/-1」")
+	print("[07] 技能:宫永咲「岭上开花/杠精」")
 	var table := MTable.new()
 	table.setup(["none", "none", "none", "saki"], -1, 123)
+	table.start_round(123)
 	var p := table.players[3]
-	p.skill.reset_for_round()
-	p.hand = MTile.parse("234m789m234p567p5m")
-	p.hand.append(MTile.parse("6m")[0])
-	check(not table._can_win_now(p), "改写前不可和")
-	check(MAI.find_pm_move(p).size() > 0, "find_pm_move 找到 6m→5m")
-	check(table.apply_plusminus(p, p.hand.size() - 1, -1), "apply_plusminus 成功")
-	check(table._can_win_now(p), "改写后形状可胡")
-	eq(p.skill.uses_left, 1, "技能次数 -1")
-	table.current_seat = 3
-	table.phase = "await_discard"
-	table._ai_discard_phase(p)
-	eq(table.result.get("type", ""), "win", "AI 咲改写后自摸")
-	check(table.result.get("han", 0) >= 2, "断幺+门前自摸 ≥2 翻")
-
-# ———————————————————— 技能:久 墙顶挑选 ————————————————————
+	# 杠精:手里有对子的 kind 摸到权重 ×3
+	p.hand = MTile.parse("234m567m234p567p5m5m")
+	var weights: Array = []
+	weights.resize(MTile.KIND_COUNT)
+	weights.fill(1.0)
+	p.skill.modify_draw_weights(table, p, weights)
+	check(weights[MTile.kind_of(MTile.parse("5m")[0])] >= 3.0, "杠精:有对子的 5万 权重×3")
+	check(weights[MTile.kind_of(MTile.parse("北")[0])] == 1.0, "无关牌权重不变")
+	# 岭上开花:听牌自摸张 ×15
+	p.hand = MTile.parse("123m456m789m123s4s")
+	var rw: Array = p.skill.rinshan_weights(table, p)
+	check(rw[MTile.kind_of(MTile.parse("4s")[0])] == 15.0, "岭上听牌自摸张权重×15")
+	check(rw[MTile.kind_of(MTile.parse("北")[0])] == 1.0, "岭上无关牌权重不变")
 
 func _test_skill_hisa() -> void:
-	print("[08] 技能:竹井久「認識の改変」")
+	print("[08] 技能:竹井久「愚听必中」")
 	var table := MTable.new()
-	table.setup(["hisa", "none", "none", "none"], 0, 321)
-	table.start_round(1)
+	table.setup(["hisa", "none", "none", "none"], -1, 321)
 	var p := table.players[0]
-	p.hand = MTile.parse("123m456m789m12s4s")
-	var before := p.hand.size()
-	table.current_seat = 0
-	table.phase = "await_discard"
-	check(table.human_use_hisa(), "human_use_hisa 预约成功")
-	eq(p.skill.uses_left, 1, "次数 -1")
-	eq(p.pending_peek, 3, "pending_peek = 3")
-	table.phase = "turn_draw"
-	table.advance_one_step()
-	eq(table.phase, "await_peek", "进入挑选阶段")
-	eq(table.peek_options.size(), 3, "墙顶 3 张可选")
-	var chosen_kind := MTile.kind_of(table.peek_options[0])
-	check(table.human_choose_peek(0), "选择成功")
-	eq(p.hand.size(), before + 1, "手牌 +1")
-	eq(MTile.kind_of(p.hand[p.hand.size() - 1]), chosen_kind, "摸到所选牌")
-
-# ———————————————————— 技能:被动加权 ————————————————————
+	# 愚形听牌(坎张 4p):自摸进张 ×8
+	p.hand = MTile.parse("123m456m789m4p6p88s")
+	var weights: Array = []
+	weights.resize(MTile.KIND_COUNT)
+	weights.fill(1.0)
+	p.skill.modify_draw_weights(table, p, weights)
+	check(weights[MTile.kind_of(MTile.parse("5p")[0])] >= 8.0, "愚形必中:坎张听牌 ×8")
+	# 两面好听不发动
+	p.hand = MTile.parse("123m456m789m4p5p88p")
+	weights = []
+	weights.resize(MTile.KIND_COUNT)
+	weights.fill(1.0)
+	p.skill.modify_draw_weights(table, p, weights)
+	check(weights[MTile.kind_of(MTile.parse("3p")[0])] == 1.0, "两面好听不发动")
+	check(weights[MTile.kind_of(MTile.parse("6p")[0])] == 1.0, "非听牌张不变")
 
 func _test_skill_weights() -> void:
 	print("[09] 技能:衣 / 和 / 玄 的概率加权")
 	var table := MTable.new()
 	table.setup(["koromo", "none", "none", "none"], -1, 55)
+	table.start_round(55)
 	var k := table.players[0]
 	k.hand = MTile.parse("123m456m789m99s中中")
 	k.river = MTile.parse("中中中")
+	table.wall.ids.resize(5)  # 晚巡:余牌 5 张
 	var weights: Array = []
 	weights.resize(MTile.KIND_COUNT)
 	weights.fill(1.0)

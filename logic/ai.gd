@@ -9,6 +9,16 @@ extends RefCounted
 
 
 ## AI 难度:0 简单 / 1 普通 / 2 困难(人类玩家无此字段时按普通处理)。
+## 积极鸣牌组:井上纯/新子憧/二条泉/亦野诚子
+static func _calls_lots(player) -> bool:
+	return player.skill != null and player.skill.id in ["jun", "ako", "izumi", "yano"]
+
+
+## 强防守组:染谷真子/弘世菫/泽村智纪/园城寺怜/宫永照
+static func _strong_defense(player) -> bool:
+	return player.skill != null and player.skill.id in ["mako", "kokaji", "tomoki", "rei", "teru"]
+
+
 static func _diff(player) -> int:
 	var v = player.get("ai_difficulty")
 	return 1 if v == null else int(v)
@@ -45,6 +55,7 @@ static func choose_discard(table, player) -> int:
 	var best_score := -1
 	var best_float := 99
 	var defend := _need_defense(table, player)
+	var strong := _strong_defense(player)
 	var full_efficiency := diff >= 2
 	# 同种去重:相同 kind 的候选受入相同,只算一次
 	var kind_score := {}
@@ -60,7 +71,7 @@ static func choose_discard(table, player) -> int:
 		var score: int = kind_score[kind_i]
 		var float_score := _isolation(player.hand[i], player.hand)
 		if defend and player.river_has(kind_i):
-			float_score -= 10  # 对手立直时,现物(自己河中出现过的kind)安全加分
+			float_score -= 25 if _strong_defense(player) else 10  # 强防守:现物价值更高
 		if score > best_score or (score == best_score and float_score < best_float):
 			best_score = score
 			best_float = float_score
@@ -144,6 +155,8 @@ static func wants_pon(table, player, kind: int) -> bool:
 	var after_counts := counts.duplicate()
 	after_counts[kind] -= 2
 	var after := MShanten.for_counts(after_counts, player.melds.size() + 1)
+	if _calls_lots(player):
+		return after <= before  # 积极鸣牌组:不恶化即碰
 	return after < before
 
 
@@ -171,6 +184,7 @@ static func chi_combos(player, kind: int) -> Array:
 static func choose_chi(table, player, combos: Array) -> int:
 	if _diff(player) == 0:
 		return -1
+	var aggressive := _calls_lots(player)
 	var kind: int = table.last_discard.kind
 	var before := MShanten.for_tiles(player.hand, player.melds.size())
 	var best_i := -1
@@ -181,7 +195,8 @@ static func choose_chi(table, player, combos: Array) -> int:
 		for k in combos[i].tiles:
 			counts[k] -= 1
 		var s := MShanten.for_counts(counts, player.melds.size() + 1)
-		var improves := s < best_s or (s == best_s and s <= 1 and best_i == -1)
+		var improves := s < best_s or (s == best_s and s <= 1 and best_i == -1) \
+			or (aggressive and s <= best_s and best_i == -1)
 		if improves:
 			best_s = mini(best_s, s)
 			best_i = i
@@ -279,8 +294,12 @@ static func _can_win_now(player) -> bool:
 
 static func _need_defense(table, player) -> bool:
 	for p in table.players:
-		if p.seat != player.seat and p.riichi:
-			return true
+		if p.seat == player.seat or not p.riichi:
+			continue
+		# 东横桃子「隐形」:她听牌/立直时,其他家 AI 感知不到威胁
+		if p.skill != null and p.skill.id == "touko":
+			continue
+		return true
 	return false
 
 

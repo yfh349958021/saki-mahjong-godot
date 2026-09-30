@@ -18,7 +18,12 @@ const BACK_SIDE_H := 36.0
 const DRAWN_GAP := 20.0   # 摸牌与手牌的间隔
 
 const CHARACTER_IDS: Array[String] = [
-	"saki", "hisa", "koromo", "nodoka", "teru", "kuro", "ako", "ryuuka",
+	"saki", "nodoka", "yuuki", "hisa", "mako",
+	"koromo", "toki", "jun", "kazue", "tomoki",
+	"mihoko", "kajiki", "touko",
+	"shizuno", "ako", "kuro", "yuu", "atsushi",
+	"rei", "ryuuka", "izumi",
+	"teru", "takakura", "yano", "kokaji",
 ]
 const WIND_CHARS: Array[String] = ["東", "南", "西", "北"]
 const SEAT_POS: Array[String] = ["bottom", "right", "top", "left"]
@@ -152,10 +157,22 @@ func _clear_ui() -> void:
 			c.queue_free()
 	_overlay = null
 	_game_root = null
+	_river_grids.clear()
+	_meld_boxes.clear()
+	_badges.clear()
+	_badge_refs.clear()
+	_hand_box = null
+	_action_box = null
+	_info_label = null
+	_hint_label = null
+	_log_label = null
+	_analyze_panel = null
+	_analyze_label = null
 
 
 func _build_select_screen() -> void:
 	_clear_ui()
+	_screen = "select"
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22ee"), 16, 28))
 	panel.set_anchors_preset(Control.PRESET_CENTER)
@@ -167,17 +184,83 @@ func _build_select_screen() -> void:
 	box.add_theme_constant_override("separation", 12)
 	panel.add_child(box)
 	box.add_child(_make_label("天才麻将少女 · 技能麻将", 30, Color("ffd166")))
-	box.add_child(_make_label("选择你的角色(AI 将使用其余角色)", 15, Color("caf0f8")))
+	box.add_child(_make_label("选择学校(AI 将使用其余学校的角色)", 15, Color("caf0f8")))
 
-	var chars := GridContainer.new()
-	chars.columns = 3
-	chars.add_theme_constant_override("h_separation", 10)
-	chars.add_theme_constant_override("v_separation", 10)
-	box.add_child(chars)
-	for cid in CHARACTER_IDS:
-		chars.add_child(_make_char_card(MSkills.create(cid), cid))
-	chars.add_child(_make_char_card(MSkill.new(), "none"))
-	box.add_child(_make_label("抽牌概率由技能改写:咲的 ±1 改写、久的墙顶挑选、衣的河牌流向、和/照的精确制导、玄的聚宝、憧的背中感知、龙华的雨", 12, Color("95d5b2")))
+	var schools := GridContainer.new()
+	schools.columns = 3
+	schools.add_theme_constant_override("h_separation", 10)
+	schools.add_theme_constant_override("v_separation", 10)
+	box.add_child(schools)
+	for school in MSkills.SCHOOLS:
+		var sc: String = school.name
+		var btn := Button.new()
+		btn.custom_minimum_size = Vector2(190, 84)
+		var sb := _panel_style(Color("1d3a2f"), 10, 8)
+		btn.add_theme_stylebox_override("normal", sb)
+		var sbh := sb.duplicate()
+		sbh.bg_color = Color("2d6a4f")
+		btn.add_theme_stylebox_override("hover", sbh)
+		btn.add_theme_stylebox_override("pressed", sbh)
+		var v := VBoxContainer.new()
+		v.set_anchors_preset(Control.PRESET_FULL_RECT)
+		v.set_offsets_preset(Control.PRESET_FULL_RECT)
+		v.alignment = BoxContainer.ALIGNMENT_CENTER
+		v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var l := _make_label(sc, 18, Color("ffffff"))
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var l2 := _make_label("%d 名角色" % school.chars.size(), 12, Color("95d5b2"))
+		l2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		v.add_child(l)
+		v.add_child(l2)
+		btn.add_child(v)
+		btn.pressed.connect(func(): _build_char_select(sc))
+		schools.add_child(btn)
+	var solo := Button.new()
+	solo.text = "不选学校 · 素人直接开局"
+	solo.custom_minimum_size = Vector2(0, 40)
+	solo.pressed.connect(func():
+		_picked_skill = "none"
+		_start_game())
+	box.add_child(solo)
+
+
+## 角色选择页(某学校)
+func _build_char_select(school_name: String) -> void:
+	_clear_ui()
+	_screen = "select"
+	var chars: Array = []
+	for school in MSkills.SCHOOLS:
+		if school.name == school_name:
+			chars = school.chars
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_style(Color("0f2e22ee"), 16, 20))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	add_child(panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	panel.add_child(box)
+	box.add_child(_make_label(school_name, 24, Color("ffd166")))
+	var chars2 := GridContainer.new()
+	chars2.columns = 3
+	chars2.add_theme_constant_override("h_separation", 8)
+	chars2.add_theme_constant_override("v_separation", 8)
+	box.add_child(chars2)
+	for cid in chars:
+		chars2.add_child(_make_char_card(MSkills.create(cid), cid))
+	var none_btn := Button.new()
+	none_btn.text = "素人(无技能)"
+	none_btn.custom_minimum_size = Vector2(190, 56)
+	none_btn.pressed.connect(func(): _on_pick_character("none"))
+	box.add_child(none_btn)
+	var back := Button.new()
+	back.text = "← 返回学校列表"
+	back.custom_minimum_size = Vector2(0, 36)
+	back.pressed.connect(_build_select_screen)
+	box.add_child(back)
 
 
 func _on_pick_character(cid: String) -> void:
@@ -461,24 +544,12 @@ func _shots_step() -> void:
 		await _save_shot("menu")
 		_build_select_screen()
 		return
-	if _tick == 10:
+	if _screen == "select" and _tick == 10:
 		await _save_shot("select")
+		_build_char_select("清澄高中")
+		return
+	if _screen == "select" and _tick == 15:
 		_on_pick_character("saki")
-		return
-	if _tick == 18:
-		# 演示房间页(房主视角:建房 + 补两台电脑)
-		net.my_name = "房主"
-		net.host_game()
-		net.my_char = "saki"
-		net.host_set_char("saki")
-		net.host_add_ai(1)
-		net.host_add_ai(2)
-		_build_room()
-		return
-	if _tick == 26:
-		await _save_shot("room")
-		net.leave()
-		_start_game()
 		return
 	if table == null or table.phase == "idle":
 		return
@@ -536,7 +607,7 @@ func _human_has_options() -> bool:
 # ———————————————————— 状态刷新 ————————————————————
 
 func _refresh() -> void:
-	if table == null:
+	if table == null or _game_root == null or not is_instance_valid(_game_root):
 		return
 	_refresh_badges()
 	_refresh_center()
