@@ -1342,8 +1342,10 @@ func _toggle_analyze() -> void:
 		_refresh_analysis()
 
 
-## 测试模式·牌效分析:下一摸宝牌/有效张概率,以及手中每张牌打出后的
-## 受入概率、放铳概率(透视各家真实听牌)、被碰概率(透视各家对子)。
+## 测试模式·牌效分析:概率与实际摸牌使用同一套技能加权模型 ——
+##   下一摸进宝牌/进有效张概率按该角色技能改写后的权重计算
+##   (玄=宝牌×4、和=听牌×6/进张×2.5、衣=河牌流向);
+##   铳/被碰为透视各家真实手牌的精确值。
 func _refresh_analysis() -> void:
 	if not _analyze_on or table == null or table.phase == "idle":
 		return
@@ -1354,23 +1356,23 @@ func _refresh_analysis() -> void:
 	var melds := me.melds.size()
 	var counts := me.concealed_counts()
 	var wall_left := maxi(1, table.wall.tiles_left())
-	var dora_left := 0
-	for kind in table.wall.dora_kinds():
-		dora_left += table.wall.remaining_count(kind)
+	var weights := _skill_draw_weights(me)
+	var p_draw := _draw_distribution(weights, wall_left)
+	var dora_p := 0.0
+	var adv_p := 0.0
 	var base := MShanten.for_counts(counts, melds)
-	var adv := 0
-	var adv_walls := 0
 	for kind in MTile.KIND_COUNT:
-		if counts[kind] >= 4:
+		if p_draw[kind] <= 0.0:
 			continue
+		if kind in table.wall.dora_kinds():
+			dora_p += p_draw[kind]
 		counts[kind] += 1
 		if MShanten.for_counts(counts, melds) < base:
-			adv += 1
-			adv_walls += table.wall.remaining_count(kind)
+			adv_p += p_draw[kind]
 		counts[kind] -= 1
+	var skill_note := "(含「%s」加权)" % me.skill.title if (me.skill != null and me.skill.passive_weight and not me.riichi) else ""
 	var lines: Array[String] = []
-	lines.append("下一摸:宝牌 %.1f%%  有效张 %.1f%%" % [
-		100.0 * dora_left / wall_left, 100.0 * adv_walls / wall_left])
+	lines.append("下一摸%s:宝牌 %.1f%%  有效张 %.1f%%" % [skill_note, 100.0 * dora_p, 100.0 * adv_p])
 	var seen := {}
 	for i in me.hand.size():
 		var kind := MTile.kind_of(me.hand[i])
@@ -1379,13 +1381,16 @@ func _refresh_analysis() -> void:
 		seen[kind] = true
 		counts[kind] -= 1
 		var sh := MShanten.for_counts(counts, melds)
-		var acc_w := 0
+		# 打出后的摸牌权重(13 张状态下技能重新生效)
+		var w2 := _skill_draw_weights(me)
+		var p2 := _draw_distribution(w2, wall_left)
+		var acc_p := 0.0
 		for kind2 in MTile.KIND_COUNT:
-			if counts[kind2] >= 4:
+			if p2[kind2] <= 0.0 or counts[kind2] >= 4:
 				continue
 			counts[kind2] += 1
 			if MShanten.for_counts(counts, melds) < sh:
-				acc_w += table.wall.remaining_count(kind2)
+				acc_p += p2[kind2]
 			counts[kind2] -= 1
 		var danger := 0
 		var pon := 0
@@ -1399,14 +1404,46 @@ func _refresh_analysis() -> void:
 			if MYaku.can_win(oc, p.melds.size()):
 				danger += 1
 			oc[kind] -= 1
-		lines.append("%s  向听%d  受入%d张 %.0f%%  铳%.0f%%  被碰%.0f%%" % [
-			MTile.label(kind), sh, acc_w, 100.0 * acc_w / wall_left,
+		lines.append("%s  向听%d  受入 %.0f%%  铳%.0f%%  被碰%.0f%%" % [
+			MTile.label(kind), sh, 100.0 * acc_p,
 			100.0 * danger / 3.0, 100.0 * pon / 3.0])
 		counts[kind] += 1
 	_analyze_label.text = "\n".join(lines)
 
 
-## 技能说明弹窗:点头像显示,再点头像或点弹窗隐藏。
+## 该玩家下一次摸牌的 kind 概率分布:与 wall.draw_weighted 的采样模型一致
+## (按技能权重选 kind;若该 kind 已在墙中耗尽则退化为均匀摸牌)。
+func _skill_draw_weights(player: MPlayer) -> Array:
+	var weights: Array = []
+	weights.resize(MTile.KIND_COUNT)
+	weights.fill(1.0)
+	if player.skill != null and player.skill.passive_weight and not player.riichi:
+		player.skill.modify_draw_weights(table, player, weights)
+	return weights
+
+
+func _draw_distribution(weights: Array, wall_left: int) -> Array:
+	var total := 0.0
+	for k in MTile.KIND_COUNT:
+		total += weights[k]
+	var p: Array = []
+	p.resize(MTile.KIND_COUNT)
+	var fallback := 0.0
+	for k in MTile.KIND_COUNT:
+		var pk: float = weights[k] / total if total > 0 else 0.0
+		if table.wall.remaining_count(k) <= 0:
+			fallback += pk  # 该 kind 已耗尽:选中后退化为均匀摸牌
+			pk = 0.0
+		p[k] = pk
+	if wall_left > 0 and fallback > 0.0:
+		for k in MTile.KIND_COUNT:
+			var avail := table.wall.remaining_count(k)
+			if avail > 0:
+				p[k] += fallback * (float(avail) / wall_left)
+	return p
+
+
+## 技能说明弹窗:点头像显示,再点头像或点弹窗隐藏。## 技能说明弹窗:点头像显示,再点头像或点弹窗隐藏。
 func _toggle_skill_popup(skill: MSkill, near: Vector2) -> void:
 	if _skill_popup != null and is_instance_valid(_skill_popup):
 		if _skill_popup.visible and _skill_popup.get_meta("char_id", "") == skill.id:
